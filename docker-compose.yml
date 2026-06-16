@@ -1,0 +1,11 @@
+services:
+  app:
+    build: .
+    image: poynting-viz
+    environment:
+      - DISPLAY=${DISPLAY:-:0}
+      - QT_X11_NO_MITSHM=1
+      - LIBGL_ALWAYS_SOFTWARE=1 # Для стабільності в контейнері без прокидання GPU
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix
+    network_mode: host # Полегшує підключення до X11 на Linux
