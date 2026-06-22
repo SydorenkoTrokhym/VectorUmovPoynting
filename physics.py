@@ -8,46 +8,66 @@ MU0 = 4 * np.pi * 1e-7  # vacuum permeability (H/m)
 def calculate_fields(
     z: NDArray[np.float64],
     t: float,
-    frequency: float = 1e9,
+    frequency: float = 1.0,
     amplitude: float = 1.0,
     polarization: str = 'linear',
-    angle: float = 0,
+    phase_shift: float = 0,
+    modulation_type: str = 'none',
+    mod_freq: float = 0.1,
+    mod_index: float = 0.5,
+    z_offset: float = 0.0,
+    direction: float = 1.0, # 1.0 for +z, -1.0 for -z
 ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
     """
-    Розрахунок полів E та B для пласкої хвилі.
-    angle: кут повороту вектора поля навколо осі Z у градусах.
+    Розрахунок полів E та B для пласкої хвилі з підтримкою модуляції, зміщення по Z та напрямку.
     """
-    omega = 2 * np.pi * frequency
-    k = omega / C
-    alpha = np.radians(angle)
-    arg = omega * t - k * z
+    omega_c = 2 * np.pi * frequency
+    omega_m = 2 * np.pi * mod_freq
+    k_c = direction * (omega_c / C)
+    phi = np.radians(phase_shift)
+
+    # Adjusted z for the wave source position
+    z_adj = z - z_offset
+    
+    if modulation_type == 'AM':
+        amp_t = amplitude * (1 + mod_index * np.cos(omega_m * t))
+        phase = omega_c * t - k_c * z_adj + phi
+    elif modulation_type == 'FM':
+        amp_t = amplitude
+        phase = omega_c * t - k_c * z_adj + mod_index * np.sin(omega_m * t) + phi
+    elif modulation_type == 'AFM':
+        amp_t = amplitude * (1 + mod_index * np.cos(omega_m * t))
+        phase = omega_c * t - k_c * z_adj + mod_index * np.sin(omega_m * t) + phi
+    else:
+        amp_t = amplitude
+        phase = omega_c * t - k_c * z_adj + phi
 
     if polarization == 'circular_right':
-        E0x = amplitude * np.cos(arg)
-        E0y = amplitude * np.sin(arg)
+        E0x = -amp_t * np.sin(phase)
+        E0y = -amp_t * np.cos(phase)
     elif polarization == 'circular_left':
-        E0x = amplitude * np.cos(arg)
-        E0y = -amplitude * np.sin(arg)
+        E0x = -amp_t * np.sin(phase)
+        E0y = amp_t * np.cos(phase)
     elif polarization == 'elliptical':
-        E0x = amplitude * np.cos(arg)
-        E0y = 0.5 * amplitude * np.cos(arg + np.pi / 4)
+        E0x = -amp_t * np.sin(phase)
+        E0y = -0.5 * amp_t * np.cos(phase + np.pi / 4)
     else:  # linear
-        E0x = amplitude * np.cos(arg)
+        E0x = -amp_t * np.sin(phase)
         E0y = np.zeros_like(E0x)
 
-    # Rotate field vector by alpha around Z-axis
-    Ex = E0x * np.cos(alpha) - E0y * np.sin(alpha)
-    Ey = E0x * np.sin(alpha) + E0y * np.cos(alpha)
-
-    # B = (1/c) * (ẑ × E)
-    Bx = -Ey / C
-    By = Ex / C
+    Ex = E0x
+    Ey = E0y
+    # B = (k x E) / omega
+    # If direction is -1, k is -k_c*z_unit, so B = (-z_unit x E) / C
+    Bx = -direction * Ey / C
+    By = direction * Ex / C
 
     return Ex, Ey, Bx, By
 
 
 def calculate_h_field(
     Bx: NDArray[np.float64],
+
     By: NDArray[np.float64],
 ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
     """Розрахунок напруженості магнітного поля H = B / μ₀"""
@@ -67,3 +87,4 @@ def calculate_poynting(
     Sy = np.zeros_like(Ex)
     Sz = (Ex * By - Ey * Bx) / MU0
     return Sx, Sy, Sz
+
