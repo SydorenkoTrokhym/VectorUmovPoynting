@@ -1,5 +1,6 @@
 import sys
 import json
+import math
 import pathlib
 import numpy as np
 import pyqtgraph as pg
@@ -7,7 +8,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QLabel, QComboBox, QDoubleSpinBox, QSpinBox,
                              QTableWidget, QTableWidgetItem, QHeaderView, QPushButton,
                              QGroupBox, QCheckBox, QTabWidget, QFileDialog, QMessageBox)
-from PyQt6.QtGui import QPixmap, QPainter, QColor, QFont
+from PyQt6.QtGui import QPixmap, QPainter, QColor, QFont, QQuaternion
 from PyQt6.QtCore import Qt, QTimer, QRect
 import pyqtgraph.opengl as gl
 
@@ -24,8 +25,8 @@ _BASE_FRAMES = {
 }
 
 _BG_COLORS = {
-    "Чорний": {"gl": "k",  "pg": "#111111", "arrow": (1.0, 1.0, 1.0, 1.0), "grid": (0.3, 0.3, 0.3, 1.0)},
-    "Білий":  {"gl": "w",  "pg": "#ffffff", "arrow": (0.0, 0.0, 0.0, 1.0), "grid": (0.5, 0.5, 0.5, 1.0)},
+    "Чорний": {"gl": "k", "grid": (0.3, 0.3, 0.3, 1.0)},
+    "Білий":  {"gl": "w", "grid": (0.5, 0.5, 0.5, 1.0)},
 }
 
 # Wave colors — kept here so both __init__ and update_plot use the same values
@@ -44,6 +45,19 @@ _AXIS_Y = (0.95, 0.25, 0.65, 1.0)  # magenta/pink
 _AXIS_Z = (0.65, 0.45, 0.20, 1.0)  # brown/tan
 
 def _c2hex(r, g, b, *_): return f'#{int(r*255):02x}{int(g*255):02x}{int(b*255):02x}'
+
+def _txt_rgba(c):
+    """GLTextItem routes its color through pg.mkColor(), which treats a 4-tuple
+    as 0-255 ints — unlike GLLinePlotItem/GLMeshItem, which take 0-1 floats for
+    OpenGL vertex colors. Our palette constants are all 0-1 floats, so any color
+    handed to a GLTextItem must be rescaled here or it renders as near-invisible
+    (truncated to 0 and alpha ~1/255)."""
+    return tuple(int(round(v * 255)) for v in c)
+
+# Camera orientation for Tab 1 ("Хвиля 1"): X up, Z left-to-right, Y toward the viewer.
+# A plain elevation/azimuth pair can't reach this exact axis mapping (it's the "wrong-handed"
+# 3-cycle of the two reachable via X-then-Z Euler rotation), so it's set as a fixed quaternion.
+_WAVE1_CAMERA_ROTATION = QQuaternion(0.5, 0.5, 0.5, 0.5)
 
 # Precomputed λ/4 tick labels: index i → text for position i*λ/4
 _TICK_LABELS = [
@@ -91,22 +105,19 @@ class MainWindow(QMainWindow):
         # Label pool — 30 per axis × 3 axes = 90 GLTextItem objects
         self.tick_label_pool: list[gl.GLTextItem] = []
         for _ in range(90):
-            lbl = gl.GLTextItem(pos=(0, 0, 0), text='', color=(0.7, 0.7, 0.7, 0.9))
+            lbl = gl.GLTextItem(pos=(0, 0, 0), text='', color=_txt_rgba((0.7, 0.7, 0.7, 0.9)))
             lbl.setVisible(False)
             self.view.addItem(lbl)
             self.tick_label_pool.append(lbl)
 
         # Current text color for tick labels (updated by _apply_background)
-        self._txt_color = (1.0, 1.0, 1.0, 1.0)
-
-        # Right: 2D plot
-        self.plot_2d = self._init_2d_plot(bg=_BG_COLORS["Чорний"]["pg"])
+        self._txt_color = _txt_rgba((1.0, 1.0, 1.0, 1.0))
 
         # Scenario tabs — each stores independent wave/modulation + source parameters
         self.scenario_params = {
-            0: {'pol': 'linear', 'phase': 0.0, 'mod_type': 'none', 'mod_freq': 0.1, 'mod_index': 0.5,
+            0: {'pol': 'linear', 'phase': 0.0, 'amplitude': 1.0, 'mod_type': 'none', 'mod_freq': 0.1, 'mod_index': 0.5,
                 'n_periods': 2, 'prop_dir': '+Z', 'dir_mode': 'Базова вісь', 'dir_vec': [0., 0., 1.]},
-            1: {'pol': 'linear', 'phase': 0.0, 'mod_type': 'none', 'mod_freq': 0.1, 'mod_index': 0.5,
+            1: {'pol': 'linear', 'phase': 0.0, 'amplitude': 1.0, 'mod_type': 'none', 'mod_freq': 0.1, 'mod_index': 0.5,
                 'n_periods': 2, 'prop_dir': '-Z', 'dir_mode': 'Базова вісь', 'dir_vec': [0., 0., -1.],
                 'x0': 0.0, 'y0': 0.0, 'z0': 3.0},
         }
@@ -117,12 +128,6 @@ class MainWindow(QMainWindow):
         self.scenario_tabs.currentChanged.connect(self._on_scenario_changed)
         # Show only the tab bar — tab content is the shared graph, not the QWidget placeholders
         self.scenario_tabs.setMaximumHeight(self.scenario_tabs.tabBar().sizeHint().height() + 4)
-
-        # Graph tabs — switch between 3D view and 2D graph
-        self.graph_tabs = QTabWidget()
-        self.graph_tabs.addTab(self.view, "3D View")
-        self.graph_tabs.addTab(self.plot_2d, "Graph (2D)")
-        self.graph_tabs.currentChanged.connect(self._on_tab_changed)
 
         # Always-visible legend strip between tab bar and graph
         self.legend_strip = QLabel("")
@@ -136,7 +141,7 @@ class MainWindow(QMainWindow):
         layout_graph.setSpacing(0)
         layout_graph.addWidget(self.scenario_tabs)
         layout_graph.addWidget(self.legend_strip)
-        layout_graph.addWidget(self.graph_tabs)
+        layout_graph.addWidget(self.view)
         container_graph = QWidget()
         container_graph.setLayout(layout_graph)
         main_layout.addWidget(container_graph)
@@ -192,7 +197,7 @@ class MainWindow(QMainWindow):
         )
         self.source2_marker.setVisible(False)
         self.view.addItem(self.source2_marker)
-        self.text_source2 = gl.GLTextItem(pos=(0, 0, 0), text='Дж.2', color=(1.0, 0.85, 0.0, 1.0))
+        self.text_source2 = gl.GLTextItem(pos=(0, 0, 0), text='Дж.2', color=_txt_rgba((1.0, 0.85, 0.0, 1.0)))
         self.text_source2.setVisible(False)
         self.view.addItem(self.text_source2)
 
@@ -200,7 +205,7 @@ class MainWindow(QMainWindow):
         self.k_indicator = gl.GLLinePlotItem(width=6, color=_W1_K, mode='lines', glOptions='translucent')
         self.e_indicator = gl.GLLinePlotItem(width=4, color=_W1_E, mode='lines', glOptions='translucent')
         self.b_indicator = gl.GLLinePlotItem(width=4, color=_W1_B, mode='lines', glOptions='translucent')
-        self.text_k  = gl.GLTextItem(pos=(0, 0, 0), text='k',  color=_W1_K)
+        self.text_k  = gl.GLTextItem(pos=(0, 0, 0), text='k',  color=_txt_rgba(_W1_K))
         for item in (self.k_indicator, self.e_indicator, self.b_indicator, self.text_k):
             self.view.addItem(item)
 
@@ -210,14 +215,14 @@ class MainWindow(QMainWindow):
         self.volume_faces = self._build_surface_faces(self.z_steps, closed=True)
 
         # Text items for coordinate axes (colored to match axis arrows)
-        self.text_x = gl.GLTextItem(pos=(12, 0, 0), text='X', color=_AXIS_X)
-        self.text_y = gl.GLTextItem(pos=(0, 12, 0), text='Y', color=_AXIS_Y)
-        self.text_z = gl.GLTextItem(pos=(0, 0, 12), text='Z', color=_AXIS_Z)
+        self.text_x = gl.GLTextItem(pos=(12, 0, 0), text='X', color=_txt_rgba(_AXIS_X))
+        self.text_y = gl.GLTextItem(pos=(0, 12, 0), text='Y', color=_txt_rgba(_AXIS_Y))
+        self.text_z = gl.GLTextItem(pos=(0, 0, 12), text='Z', color=_txt_rgba(_AXIS_Z))
         # E/B direction labels — per-wave colors
-        self.text_e  = gl.GLTextItem(pos=(5, 0, 0), text='E₁', color=_W1_E)
-        self.text_b  = gl.GLTextItem(pos=(0, 5, 0), text='B₁', color=_W1_B)
-        self.text_e2 = gl.GLTextItem(pos=(5, 0, 0), text='E₂', color=_W2_E)
-        self.text_b2 = gl.GLTextItem(pos=(0, 5, 0), text='B₂', color=_W2_B)
+        self.text_e  = gl.GLTextItem(pos=(5, 0, 0), text='E₁', color=_txt_rgba(_W1_E))
+        self.text_b  = gl.GLTextItem(pos=(0, 5, 0), text='B₁', color=_txt_rgba(_W1_B))
+        self.text_e2 = gl.GLTextItem(pos=(5, 0, 0), text='E₂', color=_txt_rgba(_W2_E))
+        self.text_b2 = gl.GLTextItem(pos=(0, 5, 0), text='B₂', color=_txt_rgba(_W2_B))
         for txt in (self.text_x, self.text_y, self.text_z,
                     self.text_e, self.text_b, self.text_e2, self.text_b2):
             self.view.addItem(txt)
@@ -250,58 +255,6 @@ class MainWindow(QMainWindow):
         )
         item = gl.GLLinePlotItem(pos=pts, color=colors, width=3, mode='lines', glOptions='translucent')
         return item
-
-    @staticmethod
-    def _build_field_arrows(t1, t2, prop, step=5, min_norm=0.1, head_size=0.3, side_scale=0.2):
-        """Build arrowhead lines in local (t1, t2, prop) space using vectorized operations."""
-        idx = np.arange(0, len(prop), step)
-        t1_s = t1[idx]
-        t2_s = t2[idx]
-        prop_s = prop[idx]
-
-        vlen = np.sqrt(t1_s**2 + t2_s**2)
-        mask = vlen >= min_norm
-        if not np.any(mask):
-            return None
-
-        t1_s = t1_s[mask]
-        t2_s = t2_s[mask]
-        prop_s = prop_s[mask]
-        vlen = vlen[mask]
-
-        ux = t1_s / vlen
-        uy = t2_s / vlen
-
-        # Side vectors
-        s1x, s1y = -uy * side_scale, ux * side_scale
-        s2z = side_scale
-
-        tips = np.column_stack([t1_s, t2_s, prop_s])
-        bases = tips - np.column_stack([ux * head_size, uy * head_size, np.zeros_like(ux)])
-
-        # Each arrow has 4 lines (8 points): tip to base+s1, tip to base-s1, tip to base+s2, tip to base-s2
-        # s1 = [s1x, s1y, 0], s2 = [0, 0, s2z]
-        
-        n = len(tips)
-        arrows = np.empty((n * 8, 3))
-        
-        # tip to base + s1
-        arrows[0::8] = tips
-        arrows[1::8] = bases + np.column_stack([s1x, s1y, np.zeros_like(s1x)])
-        
-        # tip to base - s1
-        arrows[2::8] = tips
-        arrows[3::8] = bases - np.column_stack([s1x, s1y, np.zeros_like(s1x)])
-        
-        # tip to base + s2
-        arrows[4::8] = tips
-        arrows[5::8] = bases + np.column_stack([np.zeros_like(s1x), np.zeros_like(s1x), np.full_like(s1x, s2z)])
-        
-        # tip to base - s2
-        arrows[6::8] = tips
-        arrows[7::8] = bases - np.column_stack([np.zeros_like(s1x), np.zeros_like(s1x), np.full_like(s1x, s2z)])
-        
-        return arrows
 
     @staticmethod
     def _build_surface_faces(z_steps, closed=False):
@@ -340,23 +293,6 @@ class MainWindow(QMainWindow):
             return _BASE_FRAMES[params.get('prop_dir', '+Z')]
 
     # ------------------------------------------------------------------
-    # 2-D plot
-    # ------------------------------------------------------------------
-
-    def _init_2d_plot(self, bg):
-        plot = pg.PlotWidget(background=bg)
-        plot.showGrid(x=True, y=True, alpha=0.3)
-        plot.addLegend()
-        plot.setLabel('bottom', 'Координата поширення')
-        plot.setLabel('left', 'Поле')
-        self.e1_2d  = plot.plot(pen=pg.mkPen(( 80, 130, 255), width=2),   name='E₁')
-        self.e2_2d  = plot.plot(pen=pg.mkPen((150, 200, 255), width=1.5), name='E₂')
-        self.b1_2d  = plot.plot(pen=pg.mkPen((255,  80,  80), width=2),   name='B₁·c')
-        self.b2_2d  = plot.plot(pen=pg.mkPen((255, 160,  80), width=1.5), name='B₂·c')
-        self.sz_2d  = plot.plot(pen=pg.mkPen(( 50, 220,  50), width=2.5), name='S (норм.)')
-        return plot
-
-    # ------------------------------------------------------------------
     # Controls
     # ------------------------------------------------------------------
 
@@ -392,6 +328,14 @@ class MainWindow(QMainWindow):
         self.pol_combo.addItems(["linear", "circular_right", "circular_left", "elliptical"])
         self.pol_combo.currentTextChanged.connect(self._on_param_changed)
         wave_layout.addWidget(self.pol_combo)
+
+        wave_layout.addWidget(QLabel("Амплітуда E = A (В/м):"))
+        self.amp_spin = QDoubleSpinBox()
+        self.amp_spin.setRange(0.1, 100.0)
+        self.amp_spin.setValue(1.0)
+        self.amp_spin.setSingleStep(0.5)
+        self.amp_spin.valueChanged.connect(self._on_param_changed)
+        wave_layout.addWidget(self.amp_spin)
 
         wave_layout.addWidget(QLabel("Зсув по фазі (°):"))
         phase_row = QHBoxLayout()
@@ -472,6 +416,14 @@ class MainWindow(QMainWindow):
         self.proj_combo.addItems(["3D", "XY (Top)", "XZ (Side)", "YZ (Front)"])
         self.proj_combo.currentIndexChanged.connect(self._on_projection_changed)
         viz_layout.addWidget(self.proj_combo)
+
+        viz_layout.addWidget(QLabel("Пікселів на довжину хвилі:"))
+        self.pxw_spin = QSpinBox()
+        self.pxw_spin.setRange(10, 2000)
+        self.pxw_spin.setValue(100)
+        self.pxw_spin.setSingleStep(10)
+        self.pxw_spin.valueChanged.connect(self._on_pxw_changed)
+        viz_layout.addWidget(self.pxw_spin)
 
         viz_layout.addWidget(QLabel("Відображення компонент:"))
         self.comp_combo = QComboBox()
@@ -558,6 +510,10 @@ class MainWindow(QMainWindow):
         self.pause_button.setText("▶ Відтворити")
         layout.addWidget(self.pause_button)
 
+        self.reset_button = QPushButton("⟲ Повернутись до початкових налаштувань")
+        self.reset_button.clicked.connect(self._on_reset)
+        layout.addWidget(self.reset_button)
+
         self.save_button = QPushButton("💾 Зберегти малюнок")
         self.save_button.clicked.connect(self._on_save_image)
         layout.addWidget(self.save_button)
@@ -603,13 +559,11 @@ class MainWindow(QMainWindow):
         if idx == 0:
             strip = (f"<b>Хвиля&nbsp;1:</b>&nbsp;&nbsp;"
                      f"<font color='{e1h}'>■&nbsp;E</font>&nbsp;&nbsp;"
-                     f"<font color='{b1h}'>■&nbsp;B</font>&nbsp;&nbsp;"
-                     f"<font color='{s1h}'>■&nbsp;S</font>"
+                     f"<font color='{b1h}'>■&nbsp;B</font>"
                      f"&nbsp;&nbsp;|&nbsp;&nbsp;Осі:&nbsp;{axes}")
             panel = (f"<b>Хвиля 1:</b><br>"
                      f"<font color='{e1h}'>■ E — електричне поле</font><br>"
                      f"<font color='{b1h}'>■ B — магнітне поле</font><br>"
-                     f"<font color='{s1h}'>■ S — вектор Пойнтінга</font><br>"
                      "<font color='gray'>─ Осі: X(фіолет.) Y(малин.) Z(корич.)</font>")
         elif idx == 1:
             strip = (f"<b>Хвиля&nbsp;2:</b>&nbsp;&nbsp;"
@@ -658,6 +612,11 @@ class MainWindow(QMainWindow):
             self.phase_spin.setValue(float(self.phase_preset_combo.currentText()))
 
     def _on_scenario_changed(self, index):
+        if index == 0:
+            self._apply_wave1_camera()
+        else:
+            self._apply_default_camera()
+
         # Tab 2 (index==2) = superposition — no editable params
         editable = index < 2
         self.wave_group.setEnabled(editable)
@@ -674,6 +633,7 @@ class MainWindow(QMainWindow):
         self._is_updating = True
         try:
             self.pol_combo.setCurrentText(params['pol'])
+            self.amp_spin.setValue(params.get('amplitude', 1.0))
             self.phase_spin.setValue(params['phase'])
             self.mod_combo.setCurrentText(params['mod_type'])
             self.mod_freq_spin.setValue(params['mod_freq'])
@@ -701,6 +661,7 @@ class MainWindow(QMainWindow):
             return
         p = self.scenario_params[index]
         p['pol']       = self.pol_combo.currentText()
+        p['amplitude'] = self.amp_spin.value()
         p['phase']     = self.phase_spin.value()
         p['mod_type']  = self.mod_combo.currentText()
         p['mod_freq']  = self.mod_freq_spin.value()
@@ -729,15 +690,7 @@ class MainWindow(QMainWindow):
         p['z0'] = self.z0_spin.value()
         self.update_plot()
 
-    def _on_tab_changed(self, index):
-        # graph_tabs drives 3D vs 2D; repr_combo drives Linear vs Surface within 3D
-        self.update_plot()
-
     def _on_repr_changed(self, text):
-        # repr_combo selects 3D rendering mode — always show the 3D view
-        self.graph_tabs.blockSignals(True)
-        self.graph_tabs.setCurrentIndex(0)
-        self.graph_tabs.blockSignals(False)
         self.update_plot()
 
     # ------------------------------------------------------------------
@@ -752,6 +705,7 @@ class MainWindow(QMainWindow):
     }
     _RANGES = {   # (min, max) inclusive
         'phase':     (0.0,  360.0),
+        'amplitude': (0.1,  100.0),
         'mod_freq':  (0.01, 1e9),
         'mod_index': (0.0,  1.0),
         'n_periods': (1,    10),
@@ -771,8 +725,36 @@ class MainWindow(QMainWindow):
                 "repr_mode":  self.repr_combo.currentText(),
                 "background": self.bg_combo.currentText(),
                 "projection": self.proj_combo.currentText(),
+                "pixels_per_wavelength": self.pxw_spin.value(),
             },
         }
+
+    @staticmethod
+    def _default_params():
+        """Initial wave/visualization configuration — same shape as _collect_params()."""
+        return {
+            "schema_version": 1,
+            "waves": {
+                "0": {'pol': 'linear', 'phase': 0.0, 'mod_type': 'none', 'mod_freq': 0.1, 'mod_index': 0.5,
+                      'n_periods': 2, 'prop_dir': '+Z', 'dir_mode': 'Базова вісь', 'dir_vec': [0., 0., 1.]},
+                "1": {'pol': 'linear', 'phase': 0.0, 'mod_type': 'none', 'mod_freq': 0.1, 'mod_index': 0.5,
+                      'n_periods': 2, 'prop_dir': '-Z', 'dir_mode': 'Базова вісь', 'dir_vec': [0., 0., -1.],
+                      'x0': 0.0, 'y0': 0.0, 'z0': 3.0},
+            },
+            "visualization": {
+                "comp_mode":  "Узагальнений підхід",
+                "repr_mode":  "Linear (3D)",
+                "background": "Чорний",
+                "projection": "3D",
+                "pixels_per_wavelength": 100,
+            },
+        }
+
+    def _on_reset(self):
+        """Restore wave/visualization settings to their initial defaults."""
+        self._apply_params(self._default_params())
+        self.t = 0.0
+        self.scenario_tabs.setCurrentIndex(0)
 
     def _validate_params(self, data):
         """Return list of error strings (empty list = data is valid)."""
@@ -834,6 +816,7 @@ class MainWindow(QMainWindow):
             w = waves[wk]; p = self.scenario_params[int(wk)]
             p.update({
                 'pol':       w['pol'],
+                'amplitude': float(w.get('amplitude', 1.0)),
                 'phase':     float(w['phase']),
                 'mod_type':  w['mod_type'],
                 'mod_freq':  float(w['mod_freq']),
@@ -862,6 +845,9 @@ class MainWindow(QMainWindow):
             bg = viz.get('background', '')
             if bg in _BG_COLORS:
                 self.bg_combo.setCurrentText(bg)
+            pxw = viz.get('pixels_per_wavelength')
+            if isinstance(pxw, (int, float)) and self.pxw_spin.minimum() <= pxw <= self.pxw_spin.maximum():
+                self.pxw_spin.setValue(int(pxw))
         finally:
             self._is_updating = False
 
@@ -913,15 +899,10 @@ class MainWindow(QMainWindow):
         self.params_status.setStyleSheet("font-size: 8pt; color: #33dd33;")
 
     def _on_save_image(self):
-        """Save screenshot of the current graph tab + data table."""
-        # Get active tab widget
-        active_tab = self.graph_tabs.currentWidget()
-        if not active_tab:
-            return
-            
+        """Save screenshot of the 3D view + data table."""
         # Grab plot image
-        plot_pixmap = active_tab.grab()
-        
+        plot_pixmap = self.view.grab()
+
         # Grab table image
         table_pixmap = self.data_table.grab()
         
@@ -947,6 +928,26 @@ class MainWindow(QMainWindow):
         if path:
             final_pixmap.save(path)
 
+    def _distance_for_pxw(self, px_per_wavelength):
+        """Camera distance such that one wavelength (= 1 unit in the λ-normalized
+        3D view) spans `px_per_wavelength` screen pixels, given the view's current
+        width and field of view."""
+        width = max(self.view.width(), 1)
+        fov = math.radians(self.view.opts.get('fov', 60))
+        return width / (px_per_wavelength * 2 * math.tan(fov / 2))
+
+    def _pixels_per_unit(self):
+        """Current on-screen pixels per 3D-view unit (= per λ), given the live
+        camera distance — used to thin out axis tick labels so they don't overlap."""
+        width = max(self.view.width(), 1)
+        dist = max(self.view.opts.get('distance', 1.0), 1e-9)
+        fov = math.radians(self.view.opts.get('fov', 60))
+        return width / (dist * 2 * math.tan(fov / 2))
+
+    def _on_pxw_changed(self):
+        self.view.opts['distance'] = self._distance_for_pxw(self.pxw_spin.value())
+        self.view.update()
+
     def _on_projection_changed(self, index):
         dist = self.view.opts['distance']
         if index == 0:    # 3D perspective
@@ -958,13 +959,27 @@ class MainWindow(QMainWindow):
         elif index == 3:  # YZ front view
             self.view.setCameraPosition(distance=dist, elevation=0, azimuth=90)
 
+    def _apply_wave1_camera(self):
+        """Fixed camera for Tab 1: X up, Z left-to-right, Y toward the viewer.
+        The look-at center is offset along +Z so the origin sits a quarter of the
+        Z-axis length left of screen-middle, leaving more room for the wave."""
+        self.view.opts['rotationMethod'] = 'quaternion'
+        self.view.opts['rotation'] = _WAVE1_CAMERA_ROTATION
+        z_axis_len = self.scenario_params[0].get('n_periods', 2) + 2
+        self.view.opts['center'] = pg.Vector(0, 0, z_axis_len * 0.25)
+        self.view.update()
+
+    def _apply_default_camera(self):
+        """Restore the standard elevation/azimuth camera (driven by proj_combo)."""
+        self.view.opts['rotationMethod'] = 'euler'
+        self._on_projection_changed(self.proj_combo.currentIndex())
+
     def _apply_background(self, name: str):
         cfg = _BG_COLORS.get(name, _BG_COLORS["Чорний"])
         self.view.setBackgroundColor(cfg["gl"])
         self.grid.setColor(cfg["grid"])
-        self.plot_2d.setBackground(cfg["pg"])
 
-        self._txt_color = (0.0, 0.0, 0.0, 1.0) if name == "Білий" else (1.0, 1.0, 1.0, 1.0)
+        self._txt_color = _txt_rgba((0.0, 0.0, 0.0, 1.0) if name == "Білий" else (1.0, 1.0, 1.0, 1.0))
         tick_color = (0.3, 0.3, 0.3, 0.7) if name == "Білий" else (0.5, 0.5, 0.5, 0.6)
         self.tick_marks.setData(color=tick_color)
         # Axis label colors are fixed per-axis (X/Y/Z) — no background adaptation needed
@@ -1001,7 +1016,6 @@ class MainWindow(QMainWindow):
         self._is_updating = True
         try:
             freq      = 1.0  # Фіксована частота
-            amp       = 5.0  # Фіксована амплітуда
             repr_mode = self.repr_combo.currentText()
             comp_mode = self.comp_combo.currentText()
             scenario_idx = self.scenario_tabs.currentIndex()
@@ -1014,6 +1028,7 @@ class MainWindow(QMainWindow):
 
             # --- wave 1: source at origin, configurable direction ---
             p1 = self.scenario_params[0]
+            amp1 = p1.get('amplitude', 1.0)
             k1, e1_1, e2_1 = self._make_wave_frame(p1)
             M1 = np.column_stack([e1_1, e2_1, k1])   # local(t1,t2,prop) → world
             off1 = np.zeros(3)
@@ -1021,6 +1036,7 @@ class MainWindow(QMainWindow):
 
             # --- wave 2: configurable source position + direction ---
             p2 = self.scenario_params[1]
+            amp2 = p2.get('amplitude', 1.0)
             k2, e1_2, e2_2 = self._make_wave_frame(p2)
             M2 = np.column_stack([e1_2, e2_2, k2])
             x0_2 = p2['x0'] * wavelength
@@ -1034,15 +1050,34 @@ class MainWindow(QMainWindow):
             z_max = max(n1 * wavelength,
                         np.linalg.norm(off2) + n2 * wavelength) * 1.15
 
+            # 3D-view positions are normalized to λ (not raw SI meters, which at 1 Hz means
+            # λ=3e8 m): at that magnitude, the GPU-rendered axis lines (float32 vertex buffers)
+            # and the CPU-rendered GLTextItem labels (float32 QMatrix4x4) round differently,
+            # visibly detaching the X/Y/Z labels from their axis tips.
+            z_max_v   = z_max / wavelength
+            off1_v    = off1 / wavelength
+            off2_v    = off2 / wavelength
+            z_wave1_v = z_wave1 / wavelength
+            z_wave2_v = z_wave2 / wavelength
+
+            # Fixed physical→view-unit scale factors for E/B/S deflection (3D-view units
+            # per V/m, etc.). These must NOT depend on amp1/amp2 — earlier they were
+            # divided by max(amp1, amp2), which silently canceled out whichever wave
+            # was largest, so raising that wave's amplitude had no visible effect.
+            # Calibrated so amp = 1 V/m gives a modest, non-dominating deflection
+            # relative to the Z (propagation) axis.
+            vis_scale = z_max_v * 0.15
+            scale_s   = z_max_v * 0.4 * MU0 * C
+
             # direction=1.0 always — sign is baked into k_hat
             Ex1, Ey1, Bx1, By1 = calculate_fields(
-                z_wave1, self.t, frequency=freq, amplitude=amp,
+                z_wave1, self.t, frequency=freq, amplitude=amp1,
                 polarization=p1['pol'], phase_shift=p1['phase'],
                 modulation_type=p1['mod_type'], mod_freq=p1['mod_freq'], mod_index=p1['mod_index'],
                 z_offset=0.0, direction=1.0,
             )
             Ex2, Ey2, Bx2, By2 = calculate_fields(
-                z_wave2, self.t, frequency=freq, amplitude=amp,
+                z_wave2, self.t, frequency=freq, amplitude=amp2,
                 polarization=p2['pol'], phase_shift=p2['phase'],
                 modulation_type=p2['mod_type'], mod_freq=p2['mod_freq'], mod_index=p2['mod_index'],
                 z_offset=0.0, direction=1.0,
@@ -1081,17 +1116,23 @@ class MainWindow(QMainWindow):
                 n_act   = int(p1['n_periods'])
 
             # --- coordinate axis arrows (fixed colors, distinct from wave colors) ---
-            axis_size = z_max * 1.1
-            s = axis_size
-            self.text_x.setData(pos=(s, 0, 0), color=_AXIS_X)
-            self.text_y.setData(pos=(0, s, 0), color=_AXIS_Y)
-            self.text_z.setData(pos=(0, 0, s), color=_AXIS_Z)
-            hs = s * 0.05; hw = s * 0.02
+            # X/Y are sized to the field actually drawn (2× its peak excursion); Z is sized to
+            # the configured wave length plus a 2λ margin — each axis fits its own data instead
+            # of sharing one oversized cube.
+            amp_extent = max(amp1, amp2, 1e-12) * vis_scale   # peak |E|/|B| reach actually drawn
+            s_x = s_y = 2 * amp_extent
+            s_z = n_act + 2
+            self.text_x.setData(pos=(s_x, 0, 0), color=_txt_rgba(_AXIS_X), text='X (E)' if scenario_idx == 0 else 'X')
+            self.text_y.setData(pos=(0, s_y, 0), color=_txt_rgba(_AXIS_Y), text='Y (H)' if scenario_idx == 0 else 'Y')
+            self.text_z.setData(pos=(0, 0, s_z), color=_txt_rgba(_AXIS_Z))
+            hs_x, hw_x = s_x * 0.05, s_x * 0.02
+            hs_y, hw_y = s_y * 0.05, s_y * 0.02
+            hs_z, hw_z = s_z * 0.05, s_z * 0.02
             axis_pts = np.array([
-                [0,0,0],[s,0,0], [s,0,0],[s-hs,hw,0], [s,0,0],[s-hs,-hw,0],
-                [0,0,0],[0,s,0], [0,s,0],[hw,s-hs,0], [0,s,0],[-hw,s-hs,0],
-                [0,0,0],[0,0,s], [0,0,s],[hw,0,s-hs], [0,0,s],[-hw,0,s-hs],
-                [0,0,s],[0,hw,s-hs], [0,0,s],[0,-hw,s-hs],
+                [0,0,0],[s_x,0,0], [s_x,0,0],[s_x-hs_x,hw_x,0], [s_x,0,0],[s_x-hs_x,-hw_x,0],
+                [0,0,0],[0,s_y,0], [0,s_y,0],[hw_y,s_y-hs_y,0], [0,s_y,0],[-hw_y,s_y-hs_y,0],
+                [0,0,0],[0,0,s_z], [0,0,s_z],[hw_z,0,s_z-hs_z], [0,0,s_z],[-hw_z,0,s_z-hs_z],
+                [0,0,s_z],[0,hw_z,s_z-hs_z], [0,0,s_z],[0,-hw_z,s_z-hs_z],
             ], dtype=float)
             axis_colors = np.array(
                 [_AXIS_X] * 6 +
@@ -1101,19 +1142,30 @@ class MainWindow(QMainWindow):
             self.axis_arrows.setData(pos=axis_pts, color=axis_colors)
 
             # --- λ/4 tick marks on X, Y, Z axes ---
-            tick_step = wavelength / 4
-            tick_sz   = axis_size * 0.018
-            n_per_ax  = min(int(axis_size / tick_step), 29)  # capped to pool size
-
+            tick_step = 0.25  # quarter-λ, in normalized (λ=1) 3D-view units
             tick_pts_list: list = []
             lbl_idx = 0
 
-            def _axis_ticks(axis_char, n):
+            # Tick marks are always drawn every λ/4, but text labels are thinned out
+            # to whichever λ/4-multiple keeps consecutive labels at least MIN_LABEL_PX
+            # apart on screen — otherwise at high zoom-out (or many periods) the labels
+            # overlap each other.
+            MIN_LABEL_PX = 45
+            px_per_unit = max(self._pixels_per_unit(), 1e-9)
+            _step_candidates = (1, 2, 4, 8, 16, 32, 64, 128)  # multiples of tick_step
+            label_step_mult = next(
+                (m for m in _step_candidates if m * tick_step * px_per_unit >= MIN_LABEL_PX),
+                _step_candidates[-1])
+
+            def _axis_ticks(axis_char, axis_len):
                 nonlocal lbl_idx
+                tick_sz = axis_len * 0.018
+                n = min(int(axis_len / tick_step), 29)  # capped to pool size
                 for i in range(1, n + 1):
                     p = i * tick_step
-                    if p > axis_size * 1.01:
+                    if p > axis_len * 1.01:
                         break
+                    show_label = (i % label_step_mult == 0)
                     text = _TICK_LABELS[i] if i < len(_TICK_LABELS) else f"{i}λ/4"
                     if axis_char == 'Z':
                         tick_pts_list.extend([[-tick_sz, 0, p], [tick_sz, 0, p],
@@ -1127,22 +1179,22 @@ class MainWindow(QMainWindow):
                         tick_pts_list.extend([[-tick_sz, p, 0], [tick_sz, p, 0],
                                               [0, p, -tick_sz], [0, p, tick_sz]])
                         lbl_pos = (-tick_sz * 3.5, p, 0.0)
-                    if lbl_idx < len(self.tick_label_pool):
+                    if show_label and lbl_idx < len(self.tick_label_pool):
                         lbl = self.tick_label_pool[lbl_idx]
                         lbl.setData(pos=lbl_pos, text=text, color=self._txt_color)
                         lbl.setVisible(True)
                         lbl_idx += 1
 
-            _axis_ticks('Z', n_per_ax)
-            _axis_ticks('X', n_per_ax)
-            _axis_ticks('Y', n_per_ax)
+            _axis_ticks('Z', s_z)
+            _axis_ticks('X', s_x)
+            _axis_ticks('Y', s_y)
             for i in range(lbl_idx, len(self.tick_label_pool)):
                 self.tick_label_pool[i].setVisible(False)
             self.tick_marks.setData(
                 pos=np.array(tick_pts_list, dtype=float) if tick_pts_list else np.zeros((2, 3)))
 
             # --- wave direction indicators (k, E, B arrows near source) ---
-            L = wavelength / 4   # local frame size = λ/4 (matches tick scale)
+            L = 0.25   # local frame size = λ/4, in normalized 3D-view units (matches tick scale)
             hl = L  * 0.25      # arrowhead length
             hw_ind = L * 0.08   # arrowhead width
 
@@ -1170,47 +1222,60 @@ class MainWindow(QMainWindow):
                 return k_pts, e_pts, b_pts, origin + k_hat*L*1.2, origin + e1_hat*L*1.2, origin + e2_hat*L*1.2
 
             show_source2 = scenario_idx in (1, 2)
-            self.source2_marker.setData(pos=off2.reshape(1, 3))
+            self.source2_marker.setData(pos=off2_v.reshape(1, 3))
             self.source2_marker.setVisible(show_source2)
-            self.text_source2.setData(pos=tuple(off2 + k2 * L * 0.6), text='Дж.2')
+            self.text_source2.setData(pos=tuple(off2_v + k2 * L * 0.6), text='Дж.2')
             self.text_source2.setVisible(show_source2)
 
             # hide wave-2 text labels by default; superposition re-enables them
             self.text_e2.setVisible(False); self.text_b2.setVisible(False)
             if scenario_idx == 0:
-                kp, ep, bp, kl, el, bl = _build_indicators(off1, k1, e1_1, e2_1)
-                self.k_indicator.setData(pos=kp, color=np.tile(_W1_K, (len(kp), 1)))
-                self.e_indicator.setData(pos=ep, color=np.tile(_W1_E, (len(ep), 1)))
-                self.b_indicator.setData(pos=bp, color=np.tile(_W1_B, (len(bp), 1)))
-                self.text_k.setData(pos=tuple(kl), color=_W1_K, text='k₁')
-                self.text_e.setData(pos=tuple(el), color=_W1_E, text='E₁'); self.text_e.setVisible(True)
-                self.text_b.setData(pos=tuple(bl), color=_W1_B, text='B₁'); self.text_b.setVisible(True)
+                # Tab 1: wave components only — no k/E/B reference arrows, labels sit on the axes
+                self.k_indicator.setVisible(False)
+                self.e_indicator.setVisible(False)
+                self.b_indicator.setVisible(False)
+                self.text_k.setVisible(False)
+                el, bl = off1_v + e1_1 * L * 1.2, off1_v + e2_1 * L * 1.2
+                self.text_e.setData(pos=tuple(el), color=_txt_rgba(_W1_E), text='E₁'); self.text_e.setVisible(True)
+                self.text_b.setData(pos=tuple(bl), color=_txt_rgba(_W1_B), text='B₁'); self.text_b.setVisible(True)
             elif scenario_idx == 1:
-                kp, ep, bp, kl, el, bl = _build_indicators(off2, k2, e1_2, e2_2)
+                self.k_indicator.setVisible(True)
+                self.e_indicator.setVisible(True)
+                self.b_indicator.setVisible(True)
+                self.text_k.setVisible(True)
+                kp, ep, bp, kl, el, bl = _build_indicators(off2_v, k2, e1_2, e2_2)
                 self.k_indicator.setData(pos=kp, color=np.tile(_W2_K, (len(kp), 1)))
                 self.e_indicator.setData(pos=ep, color=np.tile(_W2_E, (len(ep), 1)))
                 self.b_indicator.setData(pos=bp, color=np.tile(_W2_B, (len(bp), 1)))
-                self.text_k.setData(pos=tuple(kl), color=_W2_K, text='k₂')
-                self.text_e.setData(pos=tuple(el), color=_W2_E, text='E₂'); self.text_e.setVisible(True)
-                self.text_b.setData(pos=tuple(bl), color=_W2_B, text='B₂'); self.text_b.setVisible(True)
+                self.text_k.setData(pos=tuple(kl), color=_txt_rgba(_W2_K), text='k₂')
+                self.text_e.setData(pos=tuple(el), color=_txt_rgba(_W2_E), text='E₂'); self.text_e.setVisible(True)
+                self.text_b.setData(pos=tuple(bl), color=_txt_rgba(_W2_B), text='B₂'); self.text_b.setVisible(True)
             else:  # Tab 3 — indicators for both waves, color-coded
-                kp1, ep1, bp1, kl1, el1, bl1 = _build_indicators(off1, k1, e1_1, e2_1)
-                kp2, ep2, bp2, kl2, el2, bl2 = _build_indicators(off2, k2, e1_2, e2_2)
+                self.k_indicator.setVisible(True)
+                self.e_indicator.setVisible(True)
+                self.b_indicator.setVisible(True)
+                self.text_k.setVisible(True)
+                kp1, ep1, bp1, kl1, el1, bl1 = _build_indicators(off1_v, k1, e1_1, e2_1)
+                kp2, ep2, bp2, kl2, el2, bl2 = _build_indicators(off2_v, k2, e1_2, e2_2)
                 k_clr = np.vstack([np.tile(_W1_K, (len(kp1), 1)), np.tile(_W2_K, (len(kp2), 1))])
                 e_clr = np.vstack([np.tile(_W1_E, (len(ep1), 1)), np.tile(_W2_E, (len(ep2), 1))])
                 b_clr = np.vstack([np.tile(_W1_B, (len(bp1), 1)), np.tile(_W2_B, (len(bp2), 1))])
                 self.k_indicator.setData(pos=np.vstack([kp1, kp2]), color=k_clr)
                 self.e_indicator.setData(pos=np.vstack([ep1, ep2]), color=e_clr)
                 self.b_indicator.setData(pos=np.vstack([bp1, bp2]), color=b_clr)
-                self.text_k.setData(pos=tuple(kl1), color=_W1_K, text='k₁')
-                self.text_e.setData(pos=tuple(el1),  color=_W1_E, text='E₁'); self.text_e.setVisible(True)
-                self.text_b.setData(pos=tuple(bl1),  color=_W1_B, text='B₁'); self.text_b.setVisible(True)
-                self.text_e2.setData(pos=tuple(el2), color=_W2_E, text='E₂'); self.text_e2.setVisible(True)
-                self.text_b2.setData(pos=tuple(bl2), color=_W2_B, text='B₂'); self.text_b2.setVisible(True)
+                self.text_k.setData(pos=tuple(kl1), color=_txt_rgba(_W1_K), text='k₁')
+                self.text_e.setData(pos=tuple(el1),  color=_txt_rgba(_W1_E), text='E₁'); self.text_e.setVisible(True)
+                self.text_b.setData(pos=tuple(bl1),  color=_txt_rgba(_W1_B), text='B₁'); self.text_b.setVisible(True)
+                self.text_e2.setData(pos=tuple(el2), color=_txt_rgba(_W2_E), text='E₂'); self.text_e2.setVisible(True)
+                self.text_b2.setData(pos=tuple(bl2), color=_txt_rgba(_W2_B), text='B₂'); self.text_b2.setVisible(True)
 
             if not hasattr(self, '_cam_init'):
-                self.view.setCameraPosition(distance=z_max * 1.5, elevation=30, azimuth=45)
-                self.grid.scale(z_max / 10, z_max / 10, 1)
+                self.view.opts['distance'] = self._distance_for_pxw(self.pxw_spin.value())
+                if scenario_idx == 0:
+                    self._apply_wave1_camera()
+                else:
+                    self.view.setCameraPosition(elevation=30, azimuth=45)
+                self.grid.scale(z_max_v / 10, z_max_v / 10, 1)
                 self._cam_init = True
 
             # --- data table ---
@@ -1255,15 +1320,14 @@ class MainWindow(QMainWindow):
                         cell.setText(self._format_value(vals_all[i, j], fmt_list[j]))
                         curr_col += 1
 
-            # --- visualization scaling ---
-            vis_scale = (z_max * 0.25) / amp if amp != 0 else 1.0
-            scale_s   = (z_max * 0.4) / (amp**2 / (MU0 * C)) if amp != 0 else 1.0
-            h_size    = z_max * 0.03
-            s_sc      = z_max * 0.02
+            # --- visualization scaling (3D-view units, i.e. normalized to λ) ---
+            h_size    = z_max_v * 0.03
+            s_sc      = z_max_v * 0.02
 
             show_e = comp_mode in ["Узагальнений підхід", "Електрична (E)"]
             show_b = comp_mode in ["Узагальнений підхід", "Магнітна (B)"]
             show_s = comp_mode == "Узагальнений підхід"
+            show_s_w1 = show_s and scenario_idx != 0  # Tab 1: no separate Poynting arrows
 
             Ex1v = Ex1 * vis_scale;  Ey1v = Ey1 * vis_scale
             vBx1 = Bx1 * C * vis_scale; vBy1 = By1 * C * vis_scale
@@ -1277,17 +1341,6 @@ class MainWindow(QMainWindow):
 
             draw_wave1 = scenario_idx in (0, 2)
             draw_wave2 = scenario_idx in (1, 2)
-
-            # ---- 2-D mode ----
-            if self.graph_tabs.currentIndex() == 1:
-                self.e1_2d.setData(z_table, tE1 * vis_scale)            if show_e else self.e1_2d.setData([], [])
-                self.e2_2d.setData(z_table, tE2 * vis_scale)            if show_e else self.e2_2d.setData([], [])
-                self.b1_2d.setData(z_table, tH1 * MU0 * C * vis_scale) if show_b else self.b1_2d.setData([], [])
-                self.b2_2d.setData(z_table, tH2 * MU0 * C * vis_scale) if show_b else self.b2_2d.setData([], [])
-                self.sz_2d.setData(z_table, tSz * scale_s)              if show_s else self.sz_2d.setData([], [])
-                for it in (self.e_line2, self.b_line2, self.s_line2, self.e_curve2, self.b_curve2):
-                    it.setVisible(False)
-                return
 
             # ---- 3-D modes ----
             def w2w(local_pts, M, origin):
@@ -1304,8 +1357,8 @@ class MainWindow(QMainWindow):
                     return w2w(np.column_stack([t1, t2, z_arr]), M, origin)
                 return local_vecs, local_curve
 
-            lv1, _ = make_wave_funcs(M1, off1, z_wave1)
-            lv2, _ = make_wave_funcs(M2, off2, z_wave2)
+            lv1, _ = make_wave_funcs(M1, off1_v, z_wave1_v)
+            lv2, _ = make_wave_funcs(M2, off2_v, z_wave2_v)
 
             def draw_s_arrows(s_val, M, origin, z_arr):
                 N = len(z_arr)
@@ -1314,7 +1367,7 @@ class MainWindow(QMainWindow):
                 s_loc[1::2, 2] = z_arr + s_val
                 idx_s = np.arange(0, N, 10)
                 sv_s = s_val[idx_s]; z_s = z_arr[idx_s]
-                mask = np.abs(sv_s) >= (z_max * 0.001)
+                mask = np.abs(sv_s) >= (z_max_v * 0.001)
                 if np.any(mask):
                     sv_s = sv_s[mask]; z_s = z_s[mask]
                     d = np.sign(sv_s); ze = z_s + sv_s; zb = ze - d * h_size
@@ -1332,37 +1385,25 @@ class MainWindow(QMainWindow):
                 return w2w(s_loc, M, origin)
 
             def draw_linear_wave(Ex_v, Ey_v, vBx, vBy, sv, M, origin, z_arr,
-                                  e_line, b_line, s_line, e_curve, b_curve, visible):
-                e_line.setVisible(show_e and visible)
-                b_line.setVisible(show_b and visible)
+                                  e_line, b_line, s_line, e_curve, b_curve, visible, show_s_flag):
+                # e_line/b_line (per-point field-vector stalks) are retired — curves only
+                e_line.setVisible(False)
+                b_line.setVisible(False)
                 e_curve.setVisible(show_e and visible)
                 b_curve.setVisible(show_b and visible)
-                s_line.setVisible(show_s and visible)
+                s_line.setVisible(show_s_flag and visible)
                 if not visible:
                     return
-                N = len(z_arr)
-                e_loc = np.zeros((N * 2, 3))
-                e_loc[0::2, 2] = z_arr
-                e_loc[1::2, 0] = Ex_v; e_loc[1::2, 1] = Ey_v; e_loc[1::2, 2] = z_arr
-                e_arr = self._build_field_arrows(Ex_v, Ey_v, z_arr, step=5, head_size=h_size, side_scale=s_sc)
-                e_full = np.vstack([e_loc, e_arr]) if e_arr is not None else e_loc
-                e_line.setData(pos=w2w(e_full, M, origin), mode='lines')
                 e_curve.setData(pos=w2w(np.column_stack([Ex_v, Ey_v, z_arr]), M, origin))
-                b_loc = np.zeros((N * 2, 3))
-                b_loc[0::2, 2] = z_arr
-                b_loc[1::2, 0] = vBx; b_loc[1::2, 1] = vBy; b_loc[1::2, 2] = z_arr
-                b_arr = self._build_field_arrows(vBx, vBy, z_arr, step=5, head_size=h_size, side_scale=s_sc)
-                b_full = np.vstack([b_loc, b_arr]) if b_arr is not None else b_loc
-                b_line.setData(pos=w2w(b_full, M, origin), mode='lines')
                 b_curve.setData(pos=w2w(np.column_stack([vBx, vBy, z_arr]), M, origin))
                 s_line.setData(pos=draw_s_arrows(sv, M, origin, z_arr))
 
             if repr_mode == "Linear (3D)":
                 self.e_surf.setVisible(False); self.b_surf.setVisible(False); self.s_surf.setVisible(False)
-                draw_linear_wave(Ex1v, Ey1v, vBx1, vBy1, sv1, M1, off1, z_wave1,
-                                 self.e_line, self.b_line, self.s_line, self.e_curve, self.b_curve, draw_wave1)
-                draw_linear_wave(Ex2v, Ey2v, vBx2, vBy2, sv2, M2, off2, z_wave2,
-                                 self.e_line2, self.b_line2, self.s_line2, self.e_curve2, self.b_curve2, draw_wave2)
+                draw_linear_wave(Ex1v, Ey1v, vBx1, vBy1, sv1, M1, off1_v, z_wave1_v,
+                                 self.e_line, self.b_line, self.s_line, self.e_curve, self.b_curve, draw_wave1, show_s_w1)
+                draw_linear_wave(Ex2v, Ey2v, vBx2, vBy2, sv2, M2, off2_v, z_wave2_v,
+                                 self.e_line2, self.b_line2, self.s_line2, self.e_curve2, self.b_curve2, draw_wave2, show_s)
 
             else:  # Surface (3D)
                 for it in (self.e_line, self.b_line, self.s_line, self.e_curve, self.b_curve,
@@ -1370,21 +1411,21 @@ class MainWindow(QMainWindow):
                     it.setVisible(False)
                 self.e_surf.setVisible(show_e and draw_wave1)
                 self.b_surf.setVisible(show_b and draw_wave1)
-                self.s_surf.setVisible(show_s and draw_wave1)
+                self.s_surf.setVisible(show_s and draw_wave1 and scenario_idx != 0)
                 if show_e and draw_wave1:
                     self.e_surf.setMeshData(vertexes=lv1(Ex1v, Ey1v), faces=self.surface_faces)
                 if show_b and draw_wave1:
                     self.b_surf.setMeshData(vertexes=lv1(vBx1, vBy1), faces=self.surface_faces)
                 if show_s and draw_wave1:
                     n_seg = 4
-                    v_s = np.zeros((len(z_wave1) * n_seg, 3))
+                    v_s = np.zeros((len(z_wave1_v) * n_seg, 3))
                     r = sv1 * 0.5
                     for i in range(n_seg):
                         angle = i * (2 * np.pi / n_seg)
                         v_s[i::n_seg, 0] = r * np.cos(angle)
                         v_s[i::n_seg, 1] = r * np.sin(angle)
-                        v_s[i::n_seg, 2] = z_wave1
-                    self.s_surf.setMeshData(vertexes=w2w(v_s, M1, off1), faces=self.volume_faces)
+                        v_s[i::n_seg, 2] = z_wave1_v
+                    self.s_surf.setMeshData(vertexes=w2w(v_s, M1, off1_v), faces=self.volume_faces)
 
         finally:
             self._is_updating = False
