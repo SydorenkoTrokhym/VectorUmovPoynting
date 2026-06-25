@@ -59,6 +59,15 @@ def _txt_rgba(c):
 # 3-cycle of the two reachable via X-then-Z Euler rotation), so it's set as a fixed quaternion.
 _WAVE1_CAMERA_ROTATION = QQuaternion(0.5, 0.5, 0.5, 0.5)
 
+# Camera orientation for Tab 2 ("Хвиля 2"): X down, Y away from the viewer, Z (visually)
+# right-to-left. A single rotation can only flip two of Tab 1's three axes and stay a proper
+# rotation (flipping all three would require mirroring the scene). This quaternion gives the
+# proper-rotation part (X down, Y away, Z left-to-right); the Z arrow/ticks/label are then
+# drawn toward -Z (see s_z in update_plot) so they read right-to-left on screen — which also
+# matches wave 2's own propagation direction (-Z by default), so its curve and indicator
+# arrows need no special-casing and stay physically correct.
+_WAVE2_CAMERA_ROTATION = QQuaternion(-0.5, 0.5, -0.5, 0.5)
+
 # Precomputed λ/4 tick labels: index i → text for position i*λ/4
 _TICK_LABELS = [
     "0", "λ/4", "λ/2", "3λ/4", "λ",
@@ -614,6 +623,8 @@ class MainWindow(QMainWindow):
     def _on_scenario_changed(self, index):
         if index == 0:
             self._apply_wave1_camera()
+        elif index == 1:
+            self._apply_wave2_camera()
         else:
             self._apply_default_camera()
 
@@ -969,6 +980,16 @@ class MainWindow(QMainWindow):
         self.view.opts['center'] = pg.Vector(0, 0, z_axis_len * 0.25)
         self.view.update()
 
+    def _apply_wave2_camera(self):
+        """Fixed camera for Tab 2: X down, Y away from the viewer, Z right-to-left.
+        The look-at center is offset along -Z so the origin sits two-thirds of the
+        screen width to the right, leaving room on the left for the wave to develop."""
+        self.view.opts['rotationMethod'] = 'quaternion'
+        self.view.opts['rotation'] = _WAVE2_CAMERA_ROTATION
+        z_axis_len = self.scenario_params[1].get('n_periods', 2) + 2
+        self.view.opts['center'] = pg.Vector(0, 0, -z_axis_len * (2.0 / 3.0))
+        self.view.update()
+
     def _apply_default_camera(self):
         """Restore the standard elevation/azimuth camera (driven by proj_combo)."""
         self.view.opts['rotationMethod'] = 'euler'
@@ -1121,9 +1142,12 @@ class MainWindow(QMainWindow):
             # of sharing one oversized cube.
             amp_extent = max(amp1, amp2, 1e-12) * vis_scale   # peak |E|/|B| reach actually drawn
             s_x = s_y = 2 * amp_extent
-            s_z = n_act + 2
-            self.text_x.setData(pos=(s_x, 0, 0), color=_txt_rgba(_AXIS_X), text='X (E)' if scenario_idx == 0 else 'X')
-            self.text_y.setData(pos=(0, s_y, 0), color=_txt_rgba(_AXIS_Y), text='Y (H)' if scenario_idx == 0 else 'Y')
+            # Tab 2: the Z arrow/ticks/label are drawn toward -Z so they run right-to-left
+            # on screen under the fixed Tab-2 camera (wave 2's own curve already does this
+            # naturally, since its default propagation direction is -Z).
+            s_z = (n_act + 2) * (-1.0 if scenario_idx == 1 else 1.0)
+            self.text_x.setData(pos=(s_x, 0, 0), color=_txt_rgba(_AXIS_X), text='X (E)' if scenario_idx in (0, 1) else 'X')
+            self.text_y.setData(pos=(0, s_y, 0), color=_txt_rgba(_AXIS_Y), text='Y (H)' if scenario_idx in (0, 1) else 'Y')
             self.text_z.setData(pos=(0, 0, s_z), color=_txt_rgba(_AXIS_Z))
             hs_x, hw_x = s_x * 0.05, s_x * 0.02
             hs_y, hw_y = s_y * 0.05, s_y * 0.02
@@ -1158,12 +1182,16 @@ class MainWindow(QMainWindow):
                 _step_candidates[-1])
 
             def _axis_ticks(axis_char, axis_len):
+                # axis_len may be negative (Tab 2's mirrored Z axis) — ticks still
+                # walk outward from the origin, just toward -axis_len instead of +axis_len.
                 nonlocal lbl_idx
-                tick_sz = axis_len * 0.018
-                n = min(int(axis_len / tick_step), 29)  # capped to pool size
+                axis_sign = -1.0 if axis_len < 0 else 1.0
+                axis_mag = abs(axis_len)
+                tick_sz = axis_mag * 0.018
+                n = min(int(axis_mag / tick_step), 29)  # capped to pool size
                 for i in range(1, n + 1):
-                    p = i * tick_step
-                    if p > axis_len * 1.01:
+                    p = i * tick_step * axis_sign
+                    if abs(p) > axis_mag * 1.01:
                         break
                     show_label = (i % label_step_mult == 0)
                     text = _TICK_LABELS[i] if i < len(_TICK_LABELS) else f"{i}λ/4"
@@ -1273,6 +1301,8 @@ class MainWindow(QMainWindow):
                 self.view.opts['distance'] = self._distance_for_pxw(self.pxw_spin.value())
                 if scenario_idx == 0:
                     self._apply_wave1_camera()
+                elif scenario_idx == 1:
+                    self._apply_wave2_camera()
                 else:
                     self.view.setCameraPosition(elevation=30, azimuth=45)
                 self.grid.scale(z_max_v / 10, z_max_v / 10, 1)
