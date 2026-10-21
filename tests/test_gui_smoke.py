@@ -4,9 +4,12 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import numpy as np
 from PyQt6.QtWidgets import QApplication
 
-from main_window import MainWindow
+from main_window import FIELD_VIEW_SCALE, MainWindow
+from physics import C
+from simulation import simulate_counterpropagating, simulate_wave
 
 
 class MainWindowSmokeTests(unittest.TestCase):
@@ -53,6 +56,28 @@ class MainWindowSmokeTests(unittest.TestCase):
                     self.app.processEvents()
                     self.window.update_plot()
                     self.assert_no_errors()
+
+    def test_drawn_curves_match_simulation(self):
+        window = self.window
+        window.t = 0.137
+        p1, p2 = window.scenario_params
+        wavelength = C / 1.0
+        cases = (
+            (0, window.e_curve, simulate_wave(p1, window.t, steps=window.z_steps)),
+            (1, window.e_curve2, simulate_wave(p2, window.t, steps=window.z_steps)),
+            (2, window.e_curve, simulate_counterpropagating(
+                p1, p2, window.t, steps=window.z_steps).wave1),
+            (2, window.e_curve2, simulate_counterpropagating(
+                p1, p2, window.t, steps=window.z_steps).wave2),
+        )
+        for index, curve, field in cases:
+            with self.subTest(tab=index, curve=curve):
+                window.scenario_tabs.setCurrentIndex(index)
+                window.t = 0.137
+                window.update_plot()
+                expected = field.positions / wavelength + field.electric * FIELD_VIEW_SCALE
+                np.testing.assert_allclose(curve.pos, expected, atol=1e-9)
+        self.assert_no_errors()
 
     def test_animation_step_and_reset(self):
         self.window.pause_button.setChecked(False)

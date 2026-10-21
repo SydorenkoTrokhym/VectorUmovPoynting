@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 import math
 import pathlib
 import numpy as np
@@ -15,12 +16,12 @@ import camera
 from camera import (BG_COLORS as _BG_COLORS, txt_rgba as _txt_rgba,
                     _WAVE1_CAMERA_ROTATION, _WAVE2_CAMERA_ROTATION)
 from controls import build_controls
-from geometry import build_surface_faces, wave_frame
+from geometry import build_surface_faces
 from models import ScenarioConfiguration, VisualizationSettings
 from persistence import ConfigurationError, configuration_from_dict, configuration_to_dict
-from physics import calculate_fields, calculate_poynting, calculate_poynting_3d, C, MU0
+from physics import C, MU0
 from renderer import WaveRenderObjects
-from simulation import simulate_counterpropagating
+from simulation import simulate_counterpropagating, simulate_wave
 
 # Propagation frames: (k_hat, e1_hat, e2_hat) where e2 = k × e1 (right-hand rule for B)
 _BASE_FRAMES = {
@@ -33,6 +34,8 @@ _BASE_FRAMES = {
 }
 
 # Wave colors — kept here so both __init__ and update_plot use the same values
+FIELD_VIEW_SCALE = 0.30  # 3D-view units per V/m (E) and per V/m-equivalent c·B
+
 _W1_E = (0.10, 0.40, 1.00, 1.0)   # blue   — wave 1 electric field
 _W1_B = (1.00, 0.20, 0.20, 1.0)   # red    — wave 1 magnetic field
 _W1_S = (0.10, 0.90, 0.10, 1.0)   # green  — wave 1 Poynting
@@ -210,7 +213,6 @@ class MainWindow(QMainWindow):
             self.view.addItem(item)
 
         self.z_steps = 200
-        self.z = np.linspace(-10, 10, self.z_steps)
         self.surface_faces = self._build_surface_faces(self.z_steps, closed=False)
         self.volume_faces = self._build_surface_faces(self.z_steps, closed=True)
 
@@ -260,12 +262,6 @@ class MainWindow(QMainWindow):
     @staticmethod
     def _build_surface_faces(z_steps, closed=False):
         return build_surface_faces(z_steps, closed)
-
-    @staticmethod
-    def _make_wave_frame(params):
-        """Return (k_hat, e1_hat, e2_hat) for the wave's propagation frame.
-        e2 = k × e1, so B = (1/c)*Ex*e2 is correct under direction=+1 in calculate_fields."""
-        return wave_frame(params)
 
     # ------------------------------------------------------------------
     # Slot handlers
@@ -745,40 +741,45 @@ class MainWindow(QMainWindow):
                 self.t += dt
 
             wavelength = C / freq
-
-            # --- wave 1: source at origin, configurable direction ---
             p1 = self.scenario_params[0]
-            amp1 = p1.amplitude
-            k1, e1_1, e2_1 = self._make_wave_frame(p1)
-            M1 = np.column_stack([e1_1, e2_1, k1])   # local(t1,t2,prop) → world
-            off1 = np.zeros(3)
-            z_wave1 = np.linspace(0, p1.periods * wavelength, self.z_steps)
-
-            # --- wave 2: configurable source position + direction ---
             p2 = self.scenario_params[1]
-            amp2 = p2.amplitude
-            k2, e1_2, e2_2 = self._make_wave_frame(p2)
-            M2 = np.column_stack([e1_2, e2_2, k2])
-            x0_2, y0_2, z0_2 = (value * wavelength for value in p2.source_position)
-            off2 = np.array([x0_2, y0_2, z0_2], dtype=float)
-            z_wave2 = np.linspace(0, p2.periods * wavelength, self.z_steps)
+            amp1, amp2 = p1.amplitude, p2.amplitude
 
-            # Global coordinate-system size covers both waves' extents
-            n1, n2 = p1.periods, p2.periods
-            z_max = max(n1 * wavelength,
-                        np.linalg.norm(off2) + n2 * wavelength) * 1.15
+            # All field data comes from simulation.py; this method only lays it out.
             if scenario_idx == 2:
-                z_max = (np.linalg.norm(p2.source_position) + 1.0) * wavelength
+                # Wave 1 starts at the origin; wave 2 starts at its XYZ point in lambda.
+                # Their directions are derived from the line connecting the two sources.
+                combined = simulate_counterpropagating(
+                    p1, p2, self.t, frequency=freq, steps=self.z_steps)
+                wave1, wave2 = combined.wave1, combined.wave2
+                table_vectors = (combined.electric, combined.magnetic_h, combined.poynting)
+                n_act = float(np.linalg.norm(p2.source_position))
+                z_max = (n_act + 1.0) * wavelength
+            else:
+                # Tab 1 is the wave from the origin, whatever source a loaded file names.
+                wave1 = simulate_wave(replace(p1, source_position=(0.0, 0.0, 0.0)),
+                                      self.t, frequency=freq, steps=self.z_steps)
+                wave2 = simulate_wave(p2, self.t, frequency=freq, steps=self.z_steps)
+                shown, shown_params = (wave1, p1) if scenario_idx == 0 else (wave2, p2)
+                table_vectors = (shown.electric, shown.magnetic_h, shown.poynting)
+                n_act = shown_params.periods
+                # Global coordinate-system size covers both waves' extents
+                source2_distance = np.linalg.norm(np.asarray(p2.source_position) * wavelength)
+                z_max = max(p1.periods * wavelength,
+                            source2_distance + p2.periods * wavelength) * 1.15
+
+            k1, e1_1, e2_1 = wave1.frame
+            k2, e1_2, e2_2 = wave2.frame
 
             # 3D-view positions are normalized to λ (not raw SI meters, which at 1 Hz means
             # λ=3e8 m): at that magnitude, the GPU-rendered axis lines (float32 vertex buffers)
             # and the CPU-rendered GLTextItem labels (float32 QMatrix4x4) round differently,
             # visibly detaching the X/Y/Z labels from their axis tips.
-            z_max_v   = z_max / wavelength
-            off1_v    = off1 / wavelength
-            off2_v    = off2 / wavelength
-            z_wave1_v = z_wave1 / wavelength
-            z_wave2_v = z_wave2 / wavelength
+            z_max_v = z_max / wavelength
+            pos1_v  = wave1.positions / wavelength
+            pos2_v  = wave2.positions / wavelength
+            off1_v  = np.zeros(3)
+            off2_v  = np.asarray(p2.source_position, dtype=float)
 
             # Fixed physical→view-unit scale factors for E/B/S deflection (3D-view units
             # per V/m, etc.). These must NOT depend on amp1/amp2 — earlier they were
@@ -788,66 +789,11 @@ class MainWindow(QMainWindow):
             # relative to the Z (propagation) axis.
             # Transverse field scale is independent of the displayed segment length.
             # Changing `periods` therefore extends only the propagation axis.
-            vis_scale = 0.30
+            vis_scale = FIELD_VIEW_SCALE
             scale_s = 0.80 * MU0 * C
             
             # Common scale for all modes
             max_amp_for_scale = max(amp1, amp2, 1e-12)
-
-            # direction=1.0 always — sign is baked into k_hat
-            Ex1, Ey1, Bx1, By1 = calculate_fields(
-                z_wave1, self.t, frequency=freq, amplitude=amp1,
-                polarization=p1.polarization, phase_shift=p1.phase_degrees,
-                modulation_type=p1.modulation_type, mod_freq=p1.modulation_frequency, mod_index=p1.modulation_index,
-                z_offset=0.0, direction=1.0,
-            )
-            Ex2, Ey2, Bx2, By2 = calculate_fields(
-                z_wave2, self.t, frequency=freq, amplitude=amp2,
-                polarization=p2.polarization, phase_shift=p2.phase_degrees,
-                modulation_type=p2.modulation_type, mod_freq=p2.modulation_frequency, mod_index=p2.modulation_index,
-                z_offset=0.0, direction=1.0,
-            )
-
-            # World-frame X/Y components for table and 2D (correct sign for all wave directions)
-            E1w = np.outer(Ex1, e1_1) + np.outer(Ey1, e2_1)
-            B1w = np.outer(Bx1, e1_1) + np.outer(By1, e2_1)
-            E2w = np.outer(Ex2, e1_2) + np.outer(Ey2, e2_2)
-            B2w = np.outer(Bx2, e1_2) + np.outer(By2, e2_2)
-            H1w, H2w = B1w / MU0, B2w / MU0
-            S1w = calculate_poynting_3d(E1w, B1w)
-            S2w = calculate_poynting_3d(E2w, B2w)
-
-            if scenario_idx == 0:
-                table_vectors = (E1w, H1w, S1w)
-                n_act = p1.periods
-            elif scenario_idx == 1:
-                table_vectors = (E2w, H2w, S2w)
-                n_act = p2.periods
-            else:
-                # Wave 1 starts at the origin; wave 2 starts at its XYZ point in lambda.
-                # Their directions are derived from the line connecting the two sources.
-                combined = simulate_counterpropagating(
-                    p1, p2, self.t, frequency=freq, steps=self.z_steps)
-                Et, Bt = combined.electric, combined.magnetic
-                table_vectors = (Et, combined.magnetic_h, combined.poynting)
-                dist_v = float(np.linalg.norm(p2.source_position))
-                n_act = dist_v
-                local_distance = np.linspace(0.0, dist_v, self.z_steps)
-                z_wave1_v = z_wave2_v = local_distance
-                k1, e1_1, e2_1 = combined.wave1.frame
-                k2, e1_2, e2_2 = combined.wave2.frame
-                Ex1 = combined.wave1.electric @ e1_1
-                Ey1 = combined.wave1.electric @ e2_1
-                Bx1 = combined.wave1.magnetic @ e1_1
-                By1 = combined.wave1.magnetic @ e2_1
-                Ex2 = combined.wave2.electric @ e1_2
-                Ey2 = combined.wave2.electric @ e2_2
-                Bx2 = combined.wave2.magnetic @ e1_2
-                By2 = combined.wave2.magnetic @ e2_2
-                off1_v = np.zeros(3)
-                off2_v = np.asarray(p2.source_position, dtype=float)
-                M1 = np.column_stack([e1_1, e2_1, k1])
-                M2 = np.column_stack([e1_2, e2_2, k2])
 
             # --- coordinate axis arrows (fixed colors, distinct from wave colors) ---
             # X/Y are sized to the field actually drawn (2× its peak excursion); Z is sized to
@@ -1078,62 +1024,52 @@ class MainWindow(QMainWindow):
             show_s_w1 = show_s and scenario_idx != 0  # Tab 1: no separate Poynting arrows
             show_s_w2 = show_s and scenario_idx != 1  # Wave 2 tab: hide Umov-Poynting vector
 
-            Ex1v = Ex1 * vis_scale;  Ey1v = Ey1 * vis_scale
-            vBx1 = Bx1 * C * vis_scale; vBy1 = By1 * C * vis_scale
-            _, _, Sz1 = calculate_poynting(Ex1, Ey1, Bx1, By1)
-            sv1 = Sz1 * scale_s
-
-            Ex2v = Ex2 * vis_scale;  Ey2v = Ey2 * vis_scale
-            vBx2 = Bx2 * C * vis_scale; vBy2 = By2 * C * vis_scale
-            _, _, Sz2 = calculate_poynting(Ex2, Ey2, Bx2, By2)
-            sv2 = Sz2 * scale_s
+            # Field vectors in 3D-view units, drawn at the simulated sample positions
+            e1_v = wave1.electric * vis_scale;  b1_v = wave1.magnetic * C * vis_scale
+            e2_v = wave2.electric * vis_scale;  b2_v = wave2.magnetic * C * vis_scale
+            sv1 = (wave1.poynting @ k1) * scale_s
+            sv2 = (wave2.poynting @ k2) * scale_s
 
             draw_wave1 = scenario_idx in (0, 2)
             draw_wave2 = scenario_idx in (1, 2)
 
             # ---- 3-D modes ----
-            def w2w(local_pts, M, origin):
-                return local_pts @ M.T + origin
+            def stalks(base, vectors):
+                """Interleave base points with their tips: one line segment per sample."""
+                pts = np.empty((len(base) * 2, 3))
+                pts[0::2] = base
+                pts[1::2] = base + vectors
+                return pts
 
-            def make_wave_funcs(M, origin, z_arr):
-                N = len(z_arr)
-                def local_vecs(t1, t2):
-                    pts = np.zeros((N * 2, 3))
-                    pts[0::2, 2] = z_arr
-                    pts[1::2, 0] = t1; pts[1::2, 1] = t2; pts[1::2, 2] = z_arr
-                    return w2w(pts, M, origin)
-                def local_curve(t1, t2):
-                    return w2w(np.column_stack([t1, t2, z_arr]), M, origin)
-                return local_vecs, local_curve
-
-            lv1, _ = make_wave_funcs(M1, off1_v, z_wave1_v)
-            lv2, _ = make_wave_funcs(M2, off2_v, z_wave2_v)
-
-            def draw_s_arrows(s_val, M, origin, z_arr):
-                N = len(z_arr)
-                s_loc = np.zeros((N * 2, 3))
-                s_loc[0::2, 2] = z_arr
-                s_loc[1::2, 2] = z_arr + s_val
-                idx_s = np.arange(0, N, 10)
-                sv_s = s_val[idx_s]; z_s = z_arr[idx_s]
+            def draw_s_arrows(s_val, pos, frame):
+                k_hat, t1, t2 = frame
+                lines = stalks(pos, np.outer(s_val, k_hat))
+                idx_s = np.arange(0, len(pos), 10)
+                sv_s = s_val[idx_s]; base = pos[idx_s]
                 mask = np.abs(sv_s) >= (z_max_v * 0.001)
                 if np.any(mask):
-                    sv_s = sv_s[mask]; z_s = z_s[mask]
-                    d = np.sign(sv_s); ze = z_s + sv_s; zb = ze - d * h_size
-                    hw_s = s_sc * 0.5; n_s = len(ze)
-                    sa = np.empty((n_s * 8, 3))
-                    sa[0::8] = np.c_[np.zeros(n_s), np.zeros(n_s), ze]
-                    sa[1::8] = np.c_[np.full(n_s, hw_s), np.zeros(n_s), zb]
-                    sa[2::8] = sa[0::8]
-                    sa[3::8] = np.c_[np.full(n_s, -hw_s), np.zeros(n_s), zb]
-                    sa[4::8] = sa[0::8]
-                    sa[5::8] = np.c_[np.zeros(n_s), np.full(n_s, hw_s), zb]
-                    sa[6::8] = sa[0::8]
-                    sa[7::8] = np.c_[np.zeros(n_s), np.full(n_s, -hw_s), zb]
-                    s_loc = np.vstack([s_loc, sa])
-                return w2w(s_loc, M, origin)
+                    sv_s = sv_s[mask]; base = base[mask]
+                    tip = base + np.outer(sv_s, k_hat)
+                    head = tip - np.outer(np.sign(sv_s) * h_size, k_hat)
+                    hw_s = s_sc * 0.5
+                    sa = np.empty((len(tip) * 8, 3))
+                    for n, side in enumerate((t1, -t1, t2, -t2)):
+                        sa[2 * n::8] = tip
+                        sa[2 * n + 1::8] = head + hw_s * side
+                    lines = np.vstack([lines, sa])
+                return lines
 
-            def draw_linear_wave(Ex_v, Ey_v, vBx, vBy, sv, M, origin, z_arr,
+            def s_tube(s_val, pos, frame, n_seg=4):
+                _, t1, t2 = frame
+                r = s_val * 0.5
+                verts = np.empty((len(pos) * n_seg, 3))
+                for i in range(n_seg):
+                    angle = i * (2 * np.pi / n_seg)
+                    verts[i::n_seg] = (pos + np.outer(r * np.cos(angle), t1)
+                                       + np.outer(r * np.sin(angle), t2))
+                return verts
+
+            def draw_linear_wave(e_v, b_v, sv, pos, frame,
                                   e_line, b_line, s_line, e_curve, b_curve, visible, show_s_flag):
                 # e_line/b_line (per-point field-vector stalks) are retired — curves only
                 e_line.setVisible(False)
@@ -1143,17 +1079,17 @@ class MainWindow(QMainWindow):
                 s_line.setVisible(show_s_flag and visible)
                 if not visible:
                     return
-                e_curve.setData(pos=w2w(np.column_stack([Ex_v, Ey_v, z_arr]), M, origin))
-                b_curve.setData(pos=w2w(np.column_stack([vBx, vBy, z_arr]), M, origin))
-                s_line.setData(pos=draw_s_arrows(sv, M, origin, z_arr))
+                e_curve.setData(pos=pos + e_v)
+                b_curve.setData(pos=pos + b_v)
+                s_line.setData(pos=draw_s_arrows(sv, pos, frame))
 
             if repr_mode == "Linear (3D)":
                 for surf in (self.e_surf, self.b_surf, self.s_surf,
                              self.e_surf2, self.b_surf2, self.s_surf2):
                     surf.setVisible(False)
-                draw_linear_wave(Ex1v, Ey1v, vBx1, vBy1, sv1, M1, off1_v, z_wave1_v,
+                draw_linear_wave(e1_v, b1_v, sv1, pos1_v, wave1.frame,
                                  self.e_line, self.b_line, self.s_line, self.e_curve, self.b_curve, draw_wave1, show_s_w1)
-                draw_linear_wave(Ex2v, Ey2v, vBx2, vBy2, sv2, M2, off2_v, z_wave2_v,
+                draw_linear_wave(e2_v, b2_v, sv2, pos2_v, wave2.frame,
                                  self.e_line2, self.b_line2, self.s_line2, self.e_curve2, self.b_curve2, draw_wave2, show_s_w2)
 
             else:  # Surface (3D)
@@ -1167,33 +1103,19 @@ class MainWindow(QMainWindow):
                 self.b_surf2.setVisible(show_b and draw_wave2)
                 self.s_surf2.setVisible(show_s_w2 and draw_wave2)
                 if show_e and draw_wave1:
-                    self.e_surf.setMeshData(vertexes=lv1(Ex1v, Ey1v), faces=self.surface_faces)
+                    self.e_surf.setMeshData(vertexes=stalks(pos1_v, e1_v), faces=self.surface_faces)
                 if show_b and draw_wave1:
-                    self.b_surf.setMeshData(vertexes=lv1(vBx1, vBy1), faces=self.surface_faces)
+                    self.b_surf.setMeshData(vertexes=stalks(pos1_v, b1_v), faces=self.surface_faces)
                 if show_s and draw_wave1:
-                    n_seg = 4
-                    v_s = np.zeros((len(z_wave1_v) * n_seg, 3))
-                    r = sv1 * 0.5
-                    for i in range(n_seg):
-                        angle = i * (2 * np.pi / n_seg)
-                        v_s[i::n_seg, 0] = r * np.cos(angle)
-                        v_s[i::n_seg, 1] = r * np.sin(angle)
-                        v_s[i::n_seg, 2] = z_wave1_v
-                    self.s_surf.setMeshData(vertexes=w2w(v_s, M1, off1_v), faces=self.volume_faces)
+                    self.s_surf.setMeshData(vertexes=s_tube(sv1, pos1_v, wave1.frame),
+                                            faces=self.volume_faces)
                 if show_e and draw_wave2:
-                    self.e_surf2.setMeshData(vertexes=lv2(Ex2v, Ey2v), faces=self.surface_faces)
+                    self.e_surf2.setMeshData(vertexes=stalks(pos2_v, e2_v), faces=self.surface_faces)
                 if show_b and draw_wave2:
-                    self.b_surf2.setMeshData(vertexes=lv2(vBx2, vBy2), faces=self.surface_faces)
+                    self.b_surf2.setMeshData(vertexes=stalks(pos2_v, b2_v), faces=self.surface_faces)
                 if show_s and draw_wave2:
-                    n_seg = 4
-                    v_s = np.zeros((len(z_wave2_v) * n_seg, 3))
-                    r = sv2 * 0.5
-                    for i in range(n_seg):
-                        angle = i * (2 * np.pi / n_seg)
-                        v_s[i::n_seg, 0] = r * np.cos(angle)
-                        v_s[i::n_seg, 1] = r * np.sin(angle)
-                        v_s[i::n_seg, 2] = z_wave2_v
-                    self.s_surf2.setMeshData(vertexes=w2w(v_s, M2, off2_v), faces=self.volume_faces)
+                    self.s_surf2.setMeshData(vertexes=s_tube(sv2, pos2_v, wave2.frame),
+                                             faces=self.volume_faces)
 
         except ValueError as exc:
             self.params_status.setText(f"Помилка обчислення: {exc}")
