@@ -6,6 +6,8 @@ from dataclasses import replace
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
+from PyQt6.QtCore import QPoint, QPointF, Qt
+from PyQt6.QtGui import QWheelEvent
 from PyQt6.QtWidgets import QApplication
 
 from main_window import FIELD_VIEW_SCALE, MainWindow
@@ -185,6 +187,62 @@ class MainWindowSmokeTests(unittest.TestCase):
         window.scenario_tabs.setCurrentIndex(1)
         self.assertTrue(window.source_position_widget.isVisible())
         self.assertEqual(window.scenario_params[1].source_position, (0.0, 0.0, 2.0))
+        self.assert_no_errors()
+
+    def test_grid_follows_coordinate_system_size(self):
+        window = self.window
+        window.scenario_tabs.setCurrentIndex(2)
+        grid_scale = lambda: window.grid.transform().data()[0]
+        window.update_plot()
+        self.assertAlmostEqual(grid_scale(), (8.0 + 1.0) / 10)
+        window.separation_spin.setValue(15.0)
+        self.assertAlmostEqual(grid_scale(), (15.0 + 1.0) / 10)
+
+    def test_poynting_tube_radius_is_never_negative(self):
+        window = self.window
+        window.repr_combo.setCurrentText("Surface (3D)")
+        window.scenario_tabs.setCurrentIndex(2)
+        window._on_time_preset("later")
+        tube = window.combined_renderer.poynting_surface
+        self.assertTrue(tube.visible())
+        p1, p2 = window.scenario_params
+        result = simulate_counterpropagating(
+            p1, replace(p2, source_position=(0.0, 0.0, 8.0)), window.t,
+            steps=window.z_steps, switch_on_time=0.0)
+        self.assertTrue((result.poynting[:, 2] < 0).any())   # S does change sign here
+        t1 = result.wave1.frame[1]
+        axis = result.positions / WAVELENGTH
+        # Vertex 0 of each ring sits at +radius along t1; a negative radius flips it.
+        ring_start = tube.opts["meshdata"].vertexes()[0::4]
+        self.assertTrue(np.all((ring_start - axis) @ t1 >= -1e-6))
+        self.assert_no_errors()
+
+    def test_background_change_recolours_tick_labels_at_once(self):
+        window = self.window
+        window.update_plot()
+        window.bg_combo.setCurrentText("Білий")
+        labels = [label for label in window.tick_label_pool if label.visible()]
+        self.assertTrue(labels)
+        for label in labels:
+            self.assertEqual(label.color.getRgb()[:3], (0, 0, 0))
+
+    def test_wheel_zoom_updates_pixels_per_wavelength(self):
+        window = self.window
+        window.update_plot()
+        self.assertEqual(window.pxw_spin.value(), 100)
+        distance = window.view.opts['distance']
+        center = QPointF(window.view.width() / 2, window.view.height() / 2)
+        wheel = QWheelEvent(center, window.view.mapToGlobal(center), QPoint(0, 0),
+                            QPoint(0, -240), Qt.MouseButton.NoButton,
+                            Qt.KeyboardModifier.NoModifier, Qt.ScrollPhase.NoScrollPhase, False)
+        QApplication.sendEvent(window.view, wheel)
+        zoomed = window.view.opts['distance']
+        self.assertGreater(zoomed, distance)   # zoomed out
+        self.app.processEvents()
+        self.assertEqual(window.pxw_spin.value(), round(window._pixels_per_unit()))
+        self.assertLess(window.pxw_spin.value(), 100)
+        # Syncing the spinbox must not move the camera again.
+        self.assertEqual(window.view.opts['distance'], zoomed)
         self.assert_no_errors()
 
     def test_animation_step_and_reset(self):

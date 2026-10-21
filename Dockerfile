@@ -3,7 +3,7 @@ FROM python:3.12-slim
 
 # Встановлюємо системні залежності для Qt6 та OpenGL
 RUN apt-get update && apt-get install -y \
-    libgl1-mesa-glx \
+    libgl1 \
     libglib2.0-0 \
     libfontconfig1 \
     libx11-6 \

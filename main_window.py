@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout,
                              QTableWidget, QTableWidgetItem, QHeaderView, QPushButton,
                              QGroupBox, QCheckBox, QTabWidget, QFileDialog, QMessageBox)
 from PyQt6.QtGui import QPixmap, QPainter, QColor, QFont, QQuaternion
-from PyQt6.QtCore import Qt, QTimer, QRect
+from PyQt6.QtCore import Qt, QEvent, QTimer, QRect
 import pyqtgraph.opengl as gl
 
 import camera
@@ -45,9 +45,10 @@ _W2_B = (1.00, 0.55, 0.10, 1.0)   # orange — wave 2 magnetic field
 _W2_S = (0.90, 0.90, 0.10, 1.0)   # yellow — wave 2 Poynting
 _W2_K = (0.60, 1.00, 0.30, 1.0)   # light green — wave 2 propagation
 
-# Combined field in the superposition tab — same hue per quantity as the individual
-# waves, but opaque and thicker; the individual waves are dimmed underneath it.
-_SUM_E = (0.30, 0.60, 1.00, 1.0)  # blue   — E₁ + E₂
+# Combined field in the superposition tab — opaque and thicker; the individual waves
+# are dimmed underneath it. E Σ is magenta: a blue would blend with E₁ (blue) and E₂
+# (cyan), and white would vanish on the white background.
+_SUM_E = (1.00, 0.25, 0.95, 1.0)  # magenta — E₁ + E₂
 _SUM_B = (1.00, 0.30, 0.30, 1.0)  # red    — B₁ + B₂
 _SUM_S = (1.00, 0.80, 0.00, 1.0)  # gold   — S of the combined field
 _MEET_FIELD_SHIFT = 0.15  # λ; offset of each wave's E/B arrows at the meeting point
@@ -98,7 +99,10 @@ class MainWindow(QMainWindow):
         self.view.opts['distance'] = 20
         self.grid = gl.GLGridItem(glOptions='translucent')
         self.grid.scale(2, 2, 1)
+        self._grid_extent = None   # z_max (in λ) the grid is currently scaled to
         self.view.addItem(self.grid)
+        # Wheel zoom and resizes change px/λ behind the spinbox's back
+        self.view.installEventFilter(self)
         # Single colored axis-arrow item (X=red, Y=green, Z=blue) — replaces GLAxisItem
         self.axis_arrows = self._make_axis_arrows()
         self.view.addItem(self.axis_arrows)
@@ -767,6 +771,27 @@ class MainWindow(QMainWindow):
     def _on_pxw_changed(self):
         self.view.opts['distance'] = self._distance_for_pxw(self.pxw_spin.value())
         self.view.update()
+        if self._paused:
+            self.update_plot()   # re-thin the tick labels for the new zoom
+
+    def eventFilter(self, obj, event):
+        if obj is self.view and event.type() in (QEvent.Type.Wheel, QEvent.Type.Resize):
+            # The view applies the zoom after this filter returns, so sync afterwards.
+            QTimer.singleShot(0, self._sync_pxw_from_camera)
+        return super().eventFilter(obj, event)
+
+    def _sync_pxw_from_camera(self):
+        """Show the camera's actual px/λ in the spinbox without moving the camera."""
+        if not hasattr(self, '_cam_init'):
+            return   # the first frame sets the camera from the spinbox, not the reverse
+        pxw = round(self._pixels_per_unit())
+        pxw = min(max(pxw, self.pxw_spin.minimum()), self.pxw_spin.maximum())
+        if pxw != self.pxw_spin.value():
+            self.pxw_spin.blockSignals(True)
+            self.pxw_spin.setValue(pxw)
+            self.pxw_spin.blockSignals(False)
+        if self._paused:
+            self.update_plot()
 
     def _on_projection_changed(self, index):
         dist = self.view.opts['distance']
@@ -812,11 +837,9 @@ class MainWindow(QMainWindow):
         self._txt_color = _txt_rgba((0.0, 0.0, 0.0, 1.0) if name == "Білий" else (1.0, 1.0, 1.0, 1.0))
         tick_color = (0.3, 0.3, 0.3, 0.7) if name == "Білий" else (0.5, 0.5, 0.5, 0.6)
         self.tick_marks.setData(color=tick_color)
+        for label in self.tick_label_pool:
+            label.setData(color=self._txt_color)
         # Axis label colors are fixed per-axis (X/Y/Z) — no background adaptation needed
-
-    # ------------------------------------------------------------------
-    # Axis permutation: local (t1, t2, prop) → world (x, y, z)
-    # ------------------------------------------------------------------
 
     def _draw_meeting_field_arrows(self, visible, positions, meet_point, k_hat,
                                    wave_vectors, sum_vectors, show_e, show_b):
@@ -878,14 +901,6 @@ class MainWindow(QMainWindow):
         return np.array([origin, tip,
                          tip, neck + side1, tip, neck - side1,
                          tip, neck + side2, tip, neck - side2])
-
-    def _get_perm(self):
-        axis = self.prop_axis_combo.currentText()
-        if axis == "X":
-            return [2, 0, 1]   # prop→x, t1→y, t2→z
-        if axis == "Y":
-            return [0, 2, 1]   # t1→x, prop→y, t2→z
-        return [0, 1, 2]       # t1→x, t2→y, prop→z  (Z default)
 
     # ------------------------------------------------------------------
     # Animation
@@ -1175,8 +1190,11 @@ class MainWindow(QMainWindow):
                     self._apply_wave2_camera()
                 else:
                     self.view.setCameraPosition(elevation=30, azimuth=45)
-                self.grid.scale(z_max_v / 10, z_max_v / 10, 1)
                 self._cam_init = True
+            if z_max_v != self._grid_extent:
+                self.grid.resetTransform()
+                self.grid.scale(z_max_v / 10, z_max_v / 10, 1)
+                self._grid_extent = z_max_v
 
             # --- data table ---
             if scenario_idx == 2:
@@ -1272,7 +1290,7 @@ class MainWindow(QMainWindow):
 
             def s_tube(s_val, pos, frame, n_seg=4):
                 _, t1, t2 = frame
-                r = s_val * 0.5
+                r = np.abs(s_val) * 0.5   # a negative radius would turn the tube inside out
                 verts = np.empty((len(pos) * n_seg, 3))
                 for i in range(n_seg):
                     angle = i * (2 * np.pi / n_seg)
