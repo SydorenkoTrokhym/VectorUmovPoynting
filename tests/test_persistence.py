@@ -1,11 +1,12 @@
 import unittest
 
-from models import ScenarioConfiguration
+from models import (Background, ComponentMode, DirectionMode, Projection, Representation,
+                    ScenarioConfiguration)
 from persistence import ConfigurationError, configuration_from_dict, configuration_to_dict
 
 
 class PersistenceTests(unittest.TestCase):
-    def test_schema_v2_round_trip(self):
+    def test_schema_v3_round_trip(self):
         original = ScenarioConfiguration()
         original.waves[0].amplitude = 2.5
         restored = configuration_from_dict(configuration_to_dict(original))
@@ -27,6 +28,36 @@ class PersistenceTests(unittest.TestCase):
         }
         restored = configuration_from_dict(legacy)
         self.assertEqual(restored.waves[1].source_position, (1, 2, 3))
+
+    def test_files_store_stable_keys_not_ui_texts(self):
+        data = configuration_to_dict(ScenarioConfiguration())
+        self.assertEqual(data["schema_version"], 3)
+        self.assertEqual(data["waves"][0]["direction_mode"], "axis")
+        self.assertEqual(data["visualization"], {
+            "component_mode": "combined", "representation_mode": "linear",
+            "background": "black", "projection": "3d", "pixels_per_wavelength": 100})
+
+    def test_schema_v2_ui_texts_are_migrated(self):
+        data = configuration_to_dict(ScenarioConfiguration())
+        data["schema_version"] = 2
+        for wave in data["waves"]:
+            wave["direction_mode"] = "Довільний вектор"
+        data["visualization"] = {
+            "component_mode": "Магнітна (B)", "representation_mode": "Surface (3D)",
+            "background": "Білий", "projection": "XZ (Side)", "pixels_per_wavelength": 250}
+        restored = configuration_from_dict(data)
+        self.assertEqual(restored.waves[1].direction_mode, DirectionMode.VECTOR)
+        viz = restored.visualization
+        self.assertEqual((viz.component_mode, viz.representation_mode, viz.background,
+                          viz.projection, viz.pixels_per_wavelength),
+                         (ComponentMode.MAGNETIC, Representation.SURFACE, Background.WHITE,
+                          Projection.SIDE, 250))
+
+    def test_invalid_visualization_value_is_rejected(self):
+        data = configuration_to_dict(ScenarioConfiguration())
+        data["visualization"]["background"] = "Чорний"   # a v2 text is not a v3 key
+        with self.assertRaises(ConfigurationError):
+            configuration_from_dict(data)
 
     def test_invalid_enum_is_rejected(self):
         data = configuration_to_dict(ScenarioConfiguration())

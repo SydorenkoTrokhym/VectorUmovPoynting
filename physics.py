@@ -65,30 +65,6 @@ def calculate_fields(
     return Ex, Ey, Bx, By
 
 
-def calculate_h_field(
-    Bx: NDArray[np.float64],
-
-    By: NDArray[np.float64],
-) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
-    """Розрахунок напруженості магнітного поля H = B / μ₀"""
-    Hx = Bx / MU0
-    Hy = By / MU0
-    return Hx, Hy
-
-
-def calculate_poynting(
-    Ex: NDArray[np.float64],
-    Ey: NDArray[np.float64],
-    Bx: NDArray[np.float64],
-    By: NDArray[np.float64],
-) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
-    """Розрахунок вектора Пойнтінга S = (1/μ₀) × (E × B)"""
-    Sx = np.zeros_like(Ex)
-    Sy = np.zeros_like(Ex)
-    Sz = (Ex * By - Ey * Bx) / MU0
-    return Sx, Sy, Sz
-
-
 def calculate_poynting_3d(
     electric: NDArray[np.float64],
     magnetic: NDArray[np.float64],

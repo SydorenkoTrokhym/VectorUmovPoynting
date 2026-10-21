@@ -10,8 +10,11 @@ from PyQt6.QtCore import QPoint, QPointF, Qt
 from PyQt6.QtGui import QWheelEvent
 from PyQt6.QtWidgets import QApplication
 
-from main_window import FIELD_VIEW_SCALE, MainWindow
+from controls import set_choice
+from main_window import MainWindow
+from models import Background, ComponentMode, Representation
 from physics import C
+from scene import FIELD_VIEW_SCALE
 from simulation import simulate_counterpropagating, simulate_wave
 
 WAVELENGTH = C / 1.0   # the window's carrier is fixed at 1 Hz
@@ -53,8 +56,8 @@ class MainWindowSmokeTests(unittest.TestCase):
         self.assert_no_errors()
 
     def test_every_tab_and_representation_renders(self):
-        for representation in ("Linear (3D)", "Surface (3D)"):
-            self.window.repr_combo.setCurrentText(representation)
+        for representation in Representation:
+            set_choice(self.window.repr_combo, representation)
             for index in (0, 1, 2, 0):
                 with self.subTest(representation=representation, tab=index):
                     self.window.scenario_tabs.setCurrentIndex(index)
@@ -70,10 +73,10 @@ class MainWindowSmokeTests(unittest.TestCase):
             p1, replace(p2, source_position=(0.0, 0.0, 8.0)), window.t,
             steps=window.z_steps, switch_on_time=0.0)
         cases = (
-            (0, window.e_curve, simulate_wave(p1, window.t, steps=window.z_steps)),
-            (1, window.e_curve2, simulate_wave(p2, window.t, steps=window.z_steps)),
-            (2, window.e_curve, superposition.wave1),
-            (2, window.e_curve2, superposition.wave2),
+            (0, window.fields.waves[0].electric_curve, simulate_wave(p1, window.t, steps=window.z_steps)),
+            (1, window.fields.waves[1].electric_curve, simulate_wave(p2, window.t, steps=window.z_steps)),
+            (2, window.fields.waves[0].electric_curve, superposition.wave1),
+            (2, window.fields.waves[1].electric_curve, superposition.wave2),
         )
         for index, curve, field in cases:
             with self.subTest(tab=index, curve=curve):
@@ -92,20 +95,20 @@ class MainWindowSmokeTests(unittest.TestCase):
         gap = 8.0   # default distance between the sources, in λ
         self.assertEqual(window.separation_spin.value(), gap)
         p2 = replace(p2, source_position=(0.0, 0.0, gap))
-        combined_e = window.combined_renderer.electric_curve
+        combined_e = window.fields.combined.electric_curve
 
         window._on_time_preset("start")
         self.assertAlmostEqual(window.t, 2.0)
-        self.assertTrue(window.e_curve.visible() and window.e_curve2.visible())
+        self.assertTrue(window.fields.waves[0].electric_curve.visible() and window.fields.waves[1].electric_curve.visible())
         self.assertFalse(combined_e.visible())   # the fronts have not met yet
 
-        self.assertFalse(any(label.visible() for label in window.meet_labels))
+        self.assertFalse(any(label.visible() for label in window.indicators.meet_labels))
 
         window._on_time_preset("meet")
         self.assertAlmostEqual(window.t, 4.0)   # 8 λ apart → fronts meet after 4 T
         self.assertIn("зустрічаються", window.time_status.text())
         meet_labels = {label.text: np.asarray(label.pos)
-                       for label in window.meet_labels if label.visible()}
+                       for label in window.indicators.meet_labels if label.visible()}
         self.assertEqual(sorted(meet_labels), ["B₁", "B₂", "E₁", "E₂", "k₁", "k₂"])
         for position in meet_labels.values():
             self.assertLess(np.linalg.norm(position - [0.0, 0.0, gap / 2]), 0.5)
@@ -136,8 +139,8 @@ class MainWindowSmokeTests(unittest.TestCase):
         window.scenario_tabs.setCurrentIndex(2)
         gap = window.configuration.source_separation
         window._on_time_preset("start")
-        self.assertFalse(window.meet_field_arrows.visible())
-        self.assertFalse(window.meet_sum_arrows.visible())
+        self.assertFalse(window.meeting_arrows.wave_arrows.visible())
+        self.assertFalse(window.meeting_arrows.sum_arrows.visible())
 
         window._set_time(gap / 2 + 0.3)   # fronts met 0.3 T ago; fields are non-zero there
         p1, p2 = window.scenario_params
@@ -148,28 +151,28 @@ class MainWindowSmokeTests(unittest.TestCase):
         idx = int(np.argmin(np.linalg.norm(positions - [0.0, 0.0, gap / 2], axis=1)))
         base = positions[idx]
         # Σ arrows start on the axis and end on the combined E/B curves.
-        sum_pos = window.meet_sum_arrows.pos
+        sum_pos = window.meeting_arrows.sum_arrows.pos
         expected_tips = [base + result.electric[idx] * FIELD_VIEW_SCALE,
                          base + result.magnetic[idx] * C * FIELD_VIEW_SCALE]
         tips = [sum_pos[i + 1] for i in range(0, len(sum_pos), 10)]
         np.testing.assert_allclose(tips, expected_tips[:len(tips)], atol=1e-9)
         # Each wave's E arrow has that wave's E there, shifted toward its own source.
-        field_pos = window.meet_field_arrows.pos
+        field_pos = window.meeting_arrows.wave_arrows.pos
         e1_start, e1_tip = field_pos[0], field_pos[1]
         np.testing.assert_allclose(e1_tip - e1_start,
                                    result.wave1.electric[idx] * FIELD_VIEW_SCALE, atol=1e-9)
         self.assertLess(e1_start[2], base[2])
-        texts = {label.text for label in window.meet_field_labels if label.visible()}
+        texts = {label.text for label in window.meeting_arrows.labels if label.visible()}
         self.assertTrue({"E₁", "E₂", "EΣ"} <= texts, texts)
 
-        window.comp_combo.setCurrentText("Магнітна (B)")
+        set_choice(window.comp_combo, ComponentMode.MAGNETIC)
         window.update_plot()
-        texts = {label.text for label in window.meet_field_labels if label.visible()}
+        texts = {label.text for label in window.meeting_arrows.labels if label.visible()}
         self.assertFalse(texts & {"E₁", "E₂", "EΣ"})
         window.scenario_tabs.setCurrentIndex(0)
         window.update_plot()
-        self.assertFalse(window.meet_sum_arrows.visible())
-        self.assertFalse(any(label.visible() for label in window.meet_field_labels))
+        self.assertFalse(window.meeting_arrows.sum_arrows.visible())
+        self.assertFalse(any(label.visible() for label in window.meeting_arrows.labels))
         self.assert_no_errors()
 
     def test_separation_moves_source_two_and_meeting_time(self):
@@ -179,8 +182,8 @@ class MainWindowSmokeTests(unittest.TestCase):
         self.assertFalse(window.source_position_widget.isVisible())
         window.separation_spin.setValue(5.0)
         self.assertEqual(window.configuration.source_separation, 5.0)
-        np.testing.assert_allclose(window.source2_marker.pos, [[0.0, 0.0, 5.0]])
-        np.testing.assert_allclose(window.meeting_marker.pos, [[0.0, 0.0, 2.5]])
+        np.testing.assert_allclose(window.indicators.source2_marker.pos, [[0.0, 0.0, 5.0]])
+        np.testing.assert_allclose(window.indicators.meeting_marker.pos, [[0.0, 0.0, 2.5]])
         window._on_time_preset("meet")
         self.assertAlmostEqual(window.t, 2.5)
         # Wave 2's own tab keeps its own source position.
@@ -192,7 +195,7 @@ class MainWindowSmokeTests(unittest.TestCase):
     def test_grid_follows_coordinate_system_size(self):
         window = self.window
         window.scenario_tabs.setCurrentIndex(2)
-        grid_scale = lambda: window.grid.transform().data()[0]
+        grid_scale = lambda: window.axes.grid.transform().data()[0]
         window.update_plot()
         self.assertAlmostEqual(grid_scale(), (8.0 + 1.0) / 10)
         window.separation_spin.setValue(15.0)
@@ -200,10 +203,10 @@ class MainWindowSmokeTests(unittest.TestCase):
 
     def test_poynting_tube_radius_is_never_negative(self):
         window = self.window
-        window.repr_combo.setCurrentText("Surface (3D)")
+        set_choice(window.repr_combo, Representation.SURFACE)
         window.scenario_tabs.setCurrentIndex(2)
         window._on_time_preset("later")
-        tube = window.combined_renderer.poynting_surface
+        tube = window.fields.combined.poynting_surface
         self.assertTrue(tube.visible())
         p1, p2 = window.scenario_params
         result = simulate_counterpropagating(
@@ -220,8 +223,8 @@ class MainWindowSmokeTests(unittest.TestCase):
     def test_background_change_recolours_tick_labels_at_once(self):
         window = self.window
         window.update_plot()
-        window.bg_combo.setCurrentText("Білий")
-        labels = [label for label in window.tick_label_pool if label.visible()]
+        set_choice(window.bg_combo, Background.WHITE)
+        labels = [label for label in window.axes.tick_labels if label.visible()]
         self.assertTrue(labels)
         for label in labels:
             self.assertEqual(label.color.getRgb()[:3], (0, 0, 0))
@@ -243,6 +246,84 @@ class MainWindowSmokeTests(unittest.TestCase):
         self.assertLess(window.pxw_spin.value(), 100)
         # Syncing the spinbox must not move the camera again.
         self.assertEqual(window.view.opts['distance'], zoomed)
+        self.assert_no_errors()
+
+    def test_drawn_axes_are_right_handed_in_every_tab(self):
+        window = self.window
+        for tab in (0, 1, 2):
+            with self.subTest(tab=tab):
+                window.scenario_tabs.setCurrentIndex(tab)
+                window.update_plot()
+                pos = np.asarray(window.axes.arrows.pos)
+                x_tip, y_tip, z_tip = pos[1], pos[7], pos[13]
+                self.assertGreater(np.linalg.det([x_tip, y_tip, z_tip]), 0)
+                self.assertGreater(z_tip[2], 0)   # the arrow labelled Z points to +Z
+        self.assert_no_errors()
+
+    def test_wave2_camera_looks_at_the_middle_of_wave2(self):
+        window = self.window
+        window.scenario_tabs.setCurrentIndex(1)
+        # default: source at z = 2, propagating −Z for 2 λ
+        np.testing.assert_allclose(list(window.view.opts['center']), [0.0, 0.0, 1.0])
+
+    def test_single_wave_tabs_show_poynting_vector(self):
+        window = self.window
+        for tab, wave in ((0, 0), (1, 1)):
+            with self.subTest(tab=tab):
+                window.scenario_tabs.setCurrentIndex(tab)
+                set_choice(window.comp_combo, ComponentMode.COMBINED)
+                window._set_time(0.3)
+                self.assertTrue(window.fields.waves[wave].poynting_vectors.visible())
+                self.assertIn("S", window.legend_strip.text())
+                set_choice(window.comp_combo, ComponentMode.ELECTRIC)
+                self.assertFalse(window.fields.waves[wave].poynting_vectors.visible())
+        self.assert_no_errors()
+
+    def test_data_table_shows_b_in_nanotesla(self):
+        window = self.window
+        window.chk_data.setChecked(True)
+        window._set_time(0.3)
+        table = window.data_table
+        headers = [table.horizontalHeaderItem(j).text() for j in range(table.columnCount())]
+        self.assertIn("By(нТл)", headers)
+        self.assertFalse(any(h.startswith("H") for h in headers))
+        wave = simulate_wave(window.scenario_params[0], window.t, steps=window.z_steps)
+        row = 3
+        index = row * (window.z_steps // 20)   # rows every λ/10 of a 2 λ segment
+        self.assertEqual(float(table.item(row, headers.index("By(нТл)")).text()),
+                         round(wave.magnetic[index, 1] * 1e9, 2))
+
+    def test_overlap_toggle_leaves_only_the_sum_in_the_overlap(self):
+        window = self.window
+        window.scenario_tabs.setCurrentIndex(2)
+        window._set_time(5.0)   # fronts met 1 T ago: 2 λ of overlap in the middle
+        p1, p2 = window.scenario_params
+        result = simulate_counterpropagating(
+            p1, replace(p2, source_position=(0.0, 0.0, 8.0)), window.t,
+            steps=window.z_steps, switch_on_time=0.0)
+        overlap = result.wave1.active & result.wave2.active
+        curve = window.fields.waves[0].electric_curve
+        self.assertEqual(len(curve.pos), result.wave1.active.sum())
+        self.assertAlmostEqual(curve.color[3], 0.30)   # dimmed under the sum
+        window.overlap_waves_check.setChecked(False)
+        self.assertEqual(len(curve.pos), (result.wave1.active & ~overlap).sum())
+        self.assertAlmostEqual(curve.color[3], 1.0)
+        self.assertTrue(window.fields.combined.electric_curve.visible())
+        self.assert_no_errors()
+
+    def test_meeting_point_directions_fade_once_fields_grow(self):
+        window = self.window
+        window.scenario_tabs.setCurrentIndex(2)
+
+        def meeting_e_alphas():
+            colors = np.asarray(window.indicators.e_arrows.color)
+            return colors[20:, 3]   # after the two source triads (10 points each)
+
+        window._on_time_preset("meet")
+        np.testing.assert_allclose(meeting_e_alphas(), 1.0)
+        window._on_time_step(+1)
+        window._on_time_step(+1)
+        np.testing.assert_allclose(meeting_e_alphas(), 0.35)
         self.assert_no_errors()
 
     def test_animation_step_and_reset(self):

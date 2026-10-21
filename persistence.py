@@ -1,20 +1,32 @@
 from __future__ import annotations
 
-from dataclasses import asdict
+from enum import StrEnum
 from typing import Any
 
 import numpy as np
 
-from models import (DEFAULT_SOURCE_SEPARATION, ScenarioConfiguration,
-                    VisualizationSettings, WaveParameters)
+from models import (DEFAULT_SOURCE_SEPARATION, Background, ComponentMode, DirectionMode,
+                    Modulation, Polarization, Projection, Representation,
+                    ScenarioConfiguration, VisualizationSettings, WaveParameters)
 from geometry import field_directions
 
-SCHEMA_VERSION = 2
-POLARIZATIONS = {"linear", "circular_right", "circular_left", "elliptical"}
-MODULATIONS = {"none", "AM", "FM", "AFM"}
+SCHEMA_VERSION = 3
 DIRECTIONS = {"+Z", "-Z", "+X", "-X", "+Y", "-Y"}
-DIRECTION_MODES = {"Базова вісь", "Довільний вектор"}
 SEPARATION_RANGE = (0.5, 20.0)   # distance between superposition sources, in λ
+
+# Schema v1/v2 stored the Ukrainian UI texts; v3 stores the enum keys instead.
+_LEGACY_VALUES = {
+    "direction_mode": {"Базова вісь": DirectionMode.AXIS,
+                       "Довільний вектор": DirectionMode.VECTOR},
+    "component_mode": {"Узагальнений підхід": ComponentMode.COMBINED,
+                       "Електрична (E)": ComponentMode.ELECTRIC,
+                       "Магнітна (B)": ComponentMode.MAGNETIC},
+    "representation_mode": {"Linear (3D)": Representation.LINEAR,
+                            "Surface (3D)": Representation.SURFACE},
+    "background": {"Чорний": Background.BLACK, "Білий": Background.WHITE},
+    "projection": {"3D": Projection.PERSPECTIVE, "XY (Top)": Projection.TOP,
+                   "XZ (Side)": Projection.SIDE, "YZ (Front)": Projection.FRONT},
+}
 
 
 class ConfigurationError(ValueError):
@@ -25,7 +37,7 @@ def configuration_to_dict(configuration: ScenarioConfiguration) -> dict[str, Any
     return {
         "schema_version": SCHEMA_VERSION,
         "waves": [wave.to_dict() for wave in configuration.waves],
-        "visualization": asdict(configuration.visualization),
+        "visualization": configuration.visualization.to_dict(),
         "source_separation": configuration.source_separation,
     }
 
@@ -60,31 +72,73 @@ def _migrate_v1(data: dict[str, Any]) -> dict[str, Any]:
     }}
 
 
+def _migrate_v2(data: dict[str, Any]) -> dict[str, Any]:
+    """Replace the Ukrainian UI texts of schema v2 with enum keys."""
+    def convert(section: Any) -> Any:
+        if not isinstance(section, dict):
+            return section
+        converted = dict(section)
+        for key, aliases in _LEGACY_VALUES.items():
+            if key in converted and converted[key] in aliases:
+                converted[key] = str(aliases[converted[key]])
+        return converted
+
+    migrated = dict(data, schema_version=3)
+    waves = data.get("waves")
+    if isinstance(waves, list):
+        migrated["waves"] = [convert(wave) for wave in waves]
+    if "visualization" in data:
+        migrated["visualization"] = convert(data["visualization"])
+    return migrated
+
+
+def _enum(enum_type: type[StrEnum], value: Any, what: str) -> StrEnum:
+    try:
+        return enum_type(value)
+    except ValueError:
+        raise ConfigurationError(f"Invalid {what}: {value!r}") from None
+
+
 def configuration_from_dict(raw: Any) -> ScenarioConfiguration:
     if not isinstance(raw, dict):
         raise ConfigurationError("Configuration must be a JSON object")
     version = raw.get("schema_version")
     if version == 1:
         raw = _migrate_v1(raw)
+        version = 2
+    if version == 2:
+        raw = _migrate_v2(raw)
     elif version != SCHEMA_VERSION:
         raise ConfigurationError(f"Unsupported schema version: {version!r}")
     waves_data = raw.get("waves")
     if not isinstance(waves_data, list) or len(waves_data) != 2:
         raise ConfigurationError("waves must contain exactly two entries")
     waves = [_parse_wave(item, index) for index, item in enumerate(waves_data)]
-    viz_data = raw.get("visualization", {})
-    try:
-        visualization = VisualizationSettings(**viz_data)
-    except (TypeError, ValueError) as exc:
-        raise ConfigurationError(f"Invalid visualization settings: {exc}") from exc
-    if not 10 <= visualization.pixels_per_wavelength <= 2000:
-        raise ConfigurationError("pixels_per_wavelength must be in [10, 2000]")
+    visualization = _parse_visualization(raw.get("visualization", {}))
     separation = raw.get("source_separation", DEFAULT_SOURCE_SEPARATION)
     if (not isinstance(separation, (int, float)) or isinstance(separation, bool)
             or not SEPARATION_RANGE[0] <= separation <= SEPARATION_RANGE[1]):
         raise ConfigurationError(
             f"source_separation must be a number in [{SEPARATION_RANGE[0]}, {SEPARATION_RANGE[1]}]")
     return ScenarioConfiguration(waves, visualization, float(separation))
+
+
+def _parse_visualization(data: Any) -> VisualizationSettings:
+    if not isinstance(data, dict):
+        raise ConfigurationError("visualization must be an object")
+    try:
+        visualization = VisualizationSettings(**data)
+    except (TypeError, ValueError) as exc:
+        raise ConfigurationError(f"Invalid visualization settings: {exc}") from exc
+    visualization.component_mode = _enum(
+        ComponentMode, visualization.component_mode, "component mode")
+    visualization.representation_mode = _enum(
+        Representation, visualization.representation_mode, "representation")
+    visualization.background = _enum(Background, visualization.background, "background")
+    visualization.projection = _enum(Projection, visualization.projection, "projection")
+    if not 10 <= visualization.pixels_per_wavelength <= 2000:
+        raise ConfigurationError("pixels_per_wavelength must be in [10, 2000]")
+    return visualization
 
 
 def _parse_wave(data: Any, index: int) -> WaveParameters:
@@ -102,15 +156,16 @@ def _parse_wave(data: Any, index: int) -> WaveParameters:
         wave = WaveParameters(**values)
     except (TypeError, ValueError) as exc:
         raise ConfigurationError(f"Invalid wave {index}: {exc}") from exc
-    if wave.polarization not in POLARIZATIONS or wave.modulation_type not in MODULATIONS:
-        raise ConfigurationError(f"Invalid wave {index} polarization or modulation")
-    if wave.propagation_direction not in DIRECTIONS or wave.direction_mode not in DIRECTION_MODES:
+    wave.polarization = _enum(Polarization, wave.polarization, f"wave {index} polarization")
+    wave.modulation_type = _enum(Modulation, wave.modulation_type, f"wave {index} modulation")
+    wave.direction_mode = _enum(DirectionMode, wave.direction_mode, f"wave {index} direction mode")
+    if wave.propagation_direction not in DIRECTIONS:
         raise ConfigurationError(f"Invalid wave {index} direction")
     try:
         flow_direction, _, _ = field_directions(wave.electric_direction, wave.magnetic_direction)
     except ValueError as exc:
         raise ConfigurationError(f"Invalid wave {index} field directions: {exc}") from exc
-    if (wave.direction_mode == "Базова вісь" and
+    if (wave.direction_mode == DirectionMode.AXIS and
             wave.propagation_direction in ("+Z", "-Z")):
         expected_z = 1.0 if wave.propagation_direction == "+Z" else -1.0
         if not np.isclose(flow_direction[2], expected_z):

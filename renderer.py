@@ -9,8 +9,6 @@ import pyqtgraph.opengl as gl
 class WaveRenderObjects:
     """All graphics primitives owned by one wave, in every representation mode."""
 
-    electric_vectors: gl.GLLinePlotItem
-    magnetic_vectors: gl.GLLinePlotItem
     poynting_vectors: gl.GLLinePlotItem
     electric_curve: gl.GLLinePlotItem
     magnetic_curve: gl.GLLinePlotItem
@@ -19,13 +17,12 @@ class WaveRenderObjects:
     poynting_surface: gl.GLMeshItem
 
     @classmethod
-    def create(cls, view: gl.GLViewWidget, electric_color, magnetic_color, poynting_color):
+    def create(cls, view: gl.GLViewWidget, electric_color, magnetic_color, poynting_color,
+               curve_width: float = 3):
         objects = cls(
-            gl.GLLinePlotItem(width=2, color=electric_color, mode="lines", glOptions="translucent"),
-            gl.GLLinePlotItem(width=2, color=magnetic_color, mode="lines", glOptions="translucent"),
             gl.GLLinePlotItem(width=4, color=poynting_color, mode="lines", glOptions="translucent"),
-            gl.GLLinePlotItem(width=3, color=electric_color, mode="line_strip", glOptions="translucent"),
-            gl.GLLinePlotItem(width=3, color=magnetic_color, mode="line_strip", glOptions="translucent"),
+            gl.GLLinePlotItem(width=curve_width, color=electric_color, mode="line_strip", glOptions="translucent"),
+            gl.GLLinePlotItem(width=curve_width, color=magnetic_color, mode="line_strip", glOptions="translucent"),
             gl.GLMeshItem(smooth=False, color=electric_color[:3] + (0.5,), shader="shaded", glOptions="translucent"),
             gl.GLMeshItem(smooth=False, color=magnetic_color[:3] + (0.5,), shader="shaded", glOptions="translucent"),
             gl.GLMeshItem(smooth=False, color=poynting_color[:3] + (0.5,), shader="shaded", glOptions="translucent"),
@@ -37,8 +34,10 @@ class WaveRenderObjects:
 
     def items(self):
         return (
-            self.electric_vectors, self.magnetic_vectors, self.poynting_vectors,
-            self.electric_curve, self.magnetic_curve, self.electric_surface,
-            self.magnetic_surface, self.poynting_surface,
+            self.poynting_vectors, self.electric_curve, self.magnetic_curve,
+            self.electric_surface, self.magnetic_surface, self.poynting_surface,
         )
 
+    def hide(self):
+        for item in self.items():
+            item.setVisible(False)

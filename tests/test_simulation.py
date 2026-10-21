@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 
-from models import WaveParameters
+from models import DirectionMode, Polarization, WaveParameters
 from physics import C
 from simulation import simulate_counterpropagating, simulate_wave, superpose
 
@@ -27,16 +27,16 @@ class SimulationTests(unittest.TestCase):
 
     def test_arbitrary_direction_obeys_maxwell_relations(self):
         field = simulate_wave(WaveParameters(
-            direction_mode="Довільний вектор",
+            direction_mode=DirectionMode.VECTOR,
             direction_vector=(1.0, -2.0, 3.0),
-            polarization="elliptical",
+            polarization=Polarization.ELLIPTICAL,
         ), 0.31)
         self.assert_vector_relation(field)
 
     def test_circular_polarization_has_constant_magnitude(self):
         amplitude = 3.25
         field = simulate_wave(WaveParameters(
-            amplitude=amplitude, polarization="circular_right"), 0.23)
+            amplitude=amplitude, polarization=Polarization.CIRCULAR_RIGHT), 0.23)
         np.testing.assert_allclose(np.linalg.norm(field.electric, axis=1), amplitude)
 
     def test_in_phase_interference_is_quadratic(self):

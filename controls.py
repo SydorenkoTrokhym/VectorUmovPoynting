@@ -6,9 +6,39 @@ from PyQt6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QGroupBox,
                               QPushButton, QSpinBox, QTableWidget, QVBoxLayout,
                               QWidget)
 
-from camera import BG_COLORS
-from models import DEFAULT_SOURCE_SEPARATION
+from models import (DEFAULT_SOURCE_SEPARATION, Background, ComponentMode, DirectionMode,
+                    Modulation, Polarization, Projection, Representation)
 from persistence import SEPARATION_RANGE
+
+# Texts shown for each stored value. Only these change when the UI is reworded.
+POLARIZATION_LABELS = {value: value.value for value in Polarization}
+MODULATION_LABELS = {value: value.value for value in Modulation}
+DIRECTION_MODE_LABELS = {DirectionMode.AXIS: "Базова вісь",
+                         DirectionMode.VECTOR: "Довільний вектор"}
+PROJECTION_LABELS = {Projection.PERSPECTIVE: "3D", Projection.TOP: "XY (Top)",
+                     Projection.SIDE: "XZ (Side)", Projection.FRONT: "YZ (Front)"}
+COMPONENT_LABELS = {ComponentMode.COMBINED: "Узагальнений підхід",
+                    ComponentMode.ELECTRIC: "Електрична (E)",
+                    ComponentMode.MAGNETIC: "Магнітна (B)"}
+REPRESENTATION_LABELS = {Representation.LINEAR: "Linear (3D)",
+                         Representation.SURFACE: "Surface (3D)"}
+BACKGROUND_LABELS = {Background.BLACK: "Чорний", Background.WHITE: "Білий"}
+
+
+def _add_choices(combo: QComboBox, labels: dict) -> None:
+    for value, label in labels.items():
+        combo.addItem(label, value.value)
+
+
+def choice(combo: QComboBox, enum_type):
+    """The enum value of the combo's current item."""
+    return enum_type(combo.currentData())
+
+
+def set_choice(combo: QComboBox, value) -> None:
+    index = combo.findData(str(value))
+    if index >= 0:
+        combo.setCurrentIndex(index)
 
 
 def build_controls(window, layout: QLayout) -> None:
@@ -45,7 +75,7 @@ def build_controls(window, layout: QLayout) -> None:
 
     wave_layout.addWidget(QLabel("Поляризація:"))
     window.pol_combo = QComboBox()
-    window.pol_combo.addItems(["linear", "circular_right", "circular_left", "elliptical"])
+    _add_choices(window.pol_combo, POLARIZATION_LABELS)
     window.pol_combo.currentTextChanged.connect(window._on_param_changed)
     wave_layout.addWidget(window.pol_combo)
 
@@ -79,7 +109,7 @@ def build_controls(window, layout: QLayout) -> None:
 
     wave_layout.addWidget(QLabel("Напрямок:"))
     window.dir_mode_combo = QComboBox()
-    window.dir_mode_combo.addItems(["Базова вісь", "Довільний вектор"])
+    _add_choices(window.dir_mode_combo, DIRECTION_MODE_LABELS)
     window.dir_mode_combo.currentTextChanged.connect(window._on_dir_mode_changed)
     wave_layout.addWidget(window.dir_mode_combo)
 
@@ -185,6 +215,12 @@ def build_controls(window, layout: QLayout) -> None:
         button.clicked.connect(lambda _checked=False, s=sign: window._on_time_step(s))
         step_row.addWidget(button)
     time_layout.addLayout(step_row)
+    window.overlap_waves_check = QCheckBox("Окремі хвилі в зоні перекриття")
+    window.overlap_waves_check.setChecked(True)
+    window.overlap_waves_check.setToolTip(
+        "Вимкніть, щоб у зоні перекриття було видно лише сумарне поле")
+    window.overlap_waves_check.toggled.connect(window._on_repr_changed)
+    time_layout.addWidget(window.overlap_waves_check)
     window.time_status = QLabel("")
     window.time_status.setWordWrap(True)
     window.time_status.setStyleSheet("font-size: 8pt;")
@@ -202,7 +238,7 @@ def build_controls(window, layout: QLayout) -> None:
 
     viz_layout.addWidget(QLabel("Проекція:"))
     window.proj_combo = QComboBox()
-    window.proj_combo.addItems(["3D", "XY (Top)", "XZ (Side)", "YZ (Front)"])
+    _add_choices(window.proj_combo, PROJECTION_LABELS)
     window.proj_combo.currentIndexChanged.connect(window._on_projection_changed)
     viz_layout.addWidget(window.proj_combo)
 
@@ -216,20 +252,20 @@ def build_controls(window, layout: QLayout) -> None:
 
     viz_layout.addWidget(QLabel("Відображення компонент:"))
     window.comp_combo = QComboBox()
-    window.comp_combo.addItems(["Узагальнений підхід", "Електрична (E)", "Магнітна (B)"])
+    _add_choices(window.comp_combo, COMPONENT_LABELS)
     window.comp_combo.currentTextChanged.connect(window._on_repr_changed)
     viz_layout.addWidget(window.comp_combo)
 
     viz_layout.addWidget(QLabel("Представлення:"))
     window.repr_combo = QComboBox()
-    window.repr_combo.addItems(["Linear (3D)", "Surface (3D)"])
+    _add_choices(window.repr_combo, REPRESENTATION_LABELS)
     window.repr_combo.currentTextChanged.connect(window._on_repr_changed)
     viz_layout.addWidget(window.repr_combo)
 
     viz_layout.addWidget(QLabel("Фон:"))
     window.bg_combo = QComboBox()
-    window.bg_combo.addItems(list(BG_COLORS.keys()))
-    window.bg_combo.currentTextChanged.connect(window._apply_background)
+    _add_choices(window.bg_combo, BACKGROUND_LABELS)
+    window.bg_combo.currentIndexChanged.connect(window._on_background_changed)
     viz_layout.addWidget(window.bg_combo)
 
     window.viz_group.setLayout(viz_layout)
@@ -241,7 +277,7 @@ def build_controls(window, layout: QLayout) -> None:
 
     mod_layout.addWidget(QLabel("Тип модуляції:"))
     window.mod_combo = QComboBox()
-    window.mod_combo.addItems(["none", "AM", "FM", "AFM"])
+    _add_choices(window.mod_combo, MODULATION_LABELS)
     window.mod_combo.currentTextChanged.connect(window._on_param_changed)
     mod_layout.addWidget(window.mod_combo)
 
@@ -268,12 +304,12 @@ def build_controls(window, layout: QLayout) -> None:
     window.data_group = QGroupBox("Дані та легенда")
     data_layout = QVBoxLayout()
 
-    window.legend_label = QLabel("")   # filled by _update_legend
+    window.legend_label = QLabel("")   # filled from legend.legend_html
     data_layout.addWidget(window.legend_label)
 
     data_layout.addWidget(QLabel("Компоненти полів (період λ/10):"))
     window.data_table = QTableWidget(11, 6)
-    window.data_table.setHorizontalHeaderLabels(["Coord", "E₁", "E₂", "H₁", "H₂", "Sz"])
+    window.data_table.setHorizontalHeaderLabels(["Coord", "E₁", "E₂", "B₁", "B₂", "Sz"])
 
     vh = window.data_table.verticalHeader()
     if vh is not None:

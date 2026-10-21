@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 from numpy.typing import NDArray
 
-from models import WaveParameters
+from models import DirectionMode, WaveParameters
 
 
 BASE_FRAMES = {
@@ -34,7 +34,7 @@ def field_directions(electric: str, magnetic: str) -> tuple[NDArray, NDArray, ND
 
 
 def wave_frame(params: WaveParameters) -> tuple[NDArray, NDArray, NDArray]:
-    if params.direction_mode == "Довільний вектор":
+    if params.direction_mode == DirectionMode.VECTOR:
         vector = np.asarray(params.direction_vector, dtype=float)
         norm = np.linalg.norm(vector)
         if norm <= 1e-9:
@@ -54,11 +54,6 @@ def wave_frame(params: WaveParameters) -> tuple[NDArray, NDArray, NDArray]:
     return BASE_FRAMES[params.propagation_direction]
 
 
-def transform_points(local_points: NDArray, frame: tuple[NDArray, NDArray, NDArray], origin: NDArray) -> NDArray:
-    matrix = np.column_stack(frame)
-    return np.asarray(local_points) @ matrix.T + np.asarray(origin)
-
-
 def build_surface_faces(steps: int, closed: bool = False) -> NDArray[np.int_]:
     faces: list[list[int]] = []
     width = 4 if closed else 2
@@ -74,16 +69,23 @@ def build_surface_faces(steps: int, closed: bool = False) -> NDArray[np.int_]:
     return np.asarray(faces, dtype=int)
 
 
-def arrow_points(origin: NDArray, direction: NDArray, head_fraction: float = 0.25) -> NDArray:
+def arrow_points(origin: NDArray, direction: NDArray, head_fraction: float = 0.25,
+                 max_head: float | None = None, width_ratio: float = 0.32) -> NDArray:
+    """Line-segment points (body + four-line head) for an arrow from origin.
+
+    The head is head_fraction of the length, capped at max_head when given, and its
+    half-width is width_ratio of the head length.
+    """
     origin, direction = np.asarray(origin, float), np.asarray(direction, float)
     length = np.linalg.norm(direction)
     if length <= 1e-12:
         raise ValueError("Arrow direction cannot be zero")
     unit, tip = direction / length, origin + direction
+    head = length * head_fraction if max_head is None else min(length * head_fraction, max_head)
     reference = np.array([0., 0., 1.]) if abs(unit[2]) < 0.9 else np.array([0., 1., 0.])
     side1 = np.cross(unit, reference); side1 /= np.linalg.norm(side1)
     side2 = np.cross(unit, side1)
-    base = tip - unit * length * head_fraction
-    width = length * head_fraction * 0.32
+    base = tip - unit * head
+    width = head * width_ratio
     return np.array([origin, tip, tip, base + side1 * width, tip, base - side1 * width,
                      tip, base + side2 * width, tip, base - side2 * width])
