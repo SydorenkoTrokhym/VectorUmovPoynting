@@ -1,4 +1,8 @@
-numpy
-PyQt6
-pyqtgraph
-PyOpenGL
+# Exact versions the app and its tests are verified with (CI and the Dockerfile
+# install from this file). uv users get the same set from uv.lock.
+numpy==2.4.6
+PyOpenGL==3.1.10
+PyQt6==6.11.0
+PyQt6-Qt6==6.11.1
+PyQt6-sip==13.11.1
+pyqtgraph==0.14.0

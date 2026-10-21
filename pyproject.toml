@@ -3,8 +3,8 @@ name = "vectorumovpoynting"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
-    "numpy",
-    "PyQt6",
-    "pyqtgraph",
-    "PyOpenGL"
+    "numpy>=2.4,<3",
+    "PyQt6>=6.11,<7",
+    "pyqtgraph>=0.14,<0.15",
+    "PyOpenGL>=3.1.10,<4",
 ]
