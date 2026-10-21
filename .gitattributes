@@ -1,0 +1,7 @@
+# Store text with LF and check it out with LF on every OS, so commits from Windows
+# no longer warn about LF/CRLF conversion. Python and the tools here accept LF.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.ico binary
