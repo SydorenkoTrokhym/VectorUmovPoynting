@@ -36,21 +36,25 @@ _BASE_FRAMES = {
 # Wave colors — kept here so both __init__ and update_plot use the same values
 FIELD_VIEW_SCALE = 0.30  # 3D-view units per V/m (E) and per V/m-equivalent c·B
 
-_W1_E = (0.10, 0.40, 1.00, 1.0)   # blue   — wave 1 electric field
-_W1_B = (1.00, 0.20, 0.20, 1.0)   # red    — wave 1 magnetic field
-_W1_S = (0.10, 0.90, 0.10, 1.0)   # green  — wave 1 Poynting
-_W1_K = (0.20, 1.00, 0.40, 1.0)   # lime   — wave 1 propagation
-_W2_E = (0.10, 0.85, 0.85, 1.0)   # cyan   — wave 2 electric field
-_W2_B = (1.00, 0.55, 0.10, 1.0)   # orange — wave 2 magnetic field
-_W2_S = (0.90, 0.90, 0.10, 1.0)   # yellow — wave 2 Poynting
-_W2_K = (0.60, 1.00, 0.30, 1.0)   # light green — wave 2 propagation
+# Palette rule: hue = physical quantity, shade = which wave. E is always blue, B red,
+# S (energy flux) gold and k green, so a quantity keeps its hue in every tab; wave 2
+# is the lighter shade and the combined field a distinct strong variant of each hue.
+# Every colour must read on both the black and the white background.
+_W1_E = (0.10, 0.35, 1.00, 1.0)   # blue        — wave 1 electric field
+_W1_B = (1.00, 0.15, 0.15, 1.0)   # red         — wave 1 magnetic field
+_W1_S = (0.85, 0.60, 0.00, 1.0)   # amber       — wave 1 Poynting
+_W1_K = (0.10, 0.75, 0.30, 1.0)   # green       — wave 1 propagation
+_W2_E = (0.35, 0.80, 1.00, 1.0)   # sky blue    — wave 2 electric field
+_W2_B = (1.00, 0.55, 0.55, 1.0)   # salmon      — wave 2 magnetic field
+_W2_S = (0.90, 0.90, 0.30, 1.0)   # pale yellow — wave 2 Poynting
+_W2_K = (0.60, 1.00, 0.40, 1.0)   # light green — wave 2 propagation
 
 # Combined field in the superposition tab — opaque and thicker; the individual waves
-# are dimmed underneath it. E Σ is magenta: a blue would blend with E₁ (blue) and E₂
-# (cyan), and white would vanish on the white background.
-_SUM_E = (1.00, 0.25, 0.95, 1.0)  # magenta — E₁ + E₂
-_SUM_B = (1.00, 0.30, 0.30, 1.0)  # red    — B₁ + B₂
-_SUM_S = (1.00, 0.80, 0.00, 1.0)  # gold   — S of the combined field
+# are dimmed underneath it. E Σ leans to violet and B Σ to pink so neither can be
+# mistaken for wave 1 or wave 2 of the same quantity.
+_SUM_E = (0.60, 0.40, 1.00, 1.0)  # violet      — E₁ + E₂
+_SUM_B = (1.00, 0.15, 0.60, 1.0)  # hot pink    — B₁ + B₂
+_SUM_S = (1.00, 0.80, 0.00, 1.0)  # gold        — S of the combined field
 _MEET_FIELD_SHIFT = 0.15  # λ; offset of each wave's E/B arrows at the meeting point
 _MEET_FIELD_MIN = 1e-3    # λ; shorter field arrows (e.g. a node) are not drawn
 _DIM_ALPHA = 0.30                 # individual waves while the combined field is shown
@@ -59,10 +63,10 @@ _DIM_ALPHA = 0.30                 # individual waves while the combined field is
 _CARRIER_FREQUENCY = 1.0
 _TIME_STEP = 0.05                 # T/20 — one animation tick and one manual step
 
-# Coordinate-axis colors — distinct from all wave colors above to avoid confusion
-_AXIS_X = (0.65, 0.20, 0.85, 1.0)  # violet
-_AXIS_Y = (0.95, 0.25, 0.65, 1.0)  # magenta/pink
-_AXIS_Z = (0.65, 0.45, 0.20, 1.0)  # brown/tan
+# Coordinate axes and markers are neutral grey: every hue is taken by a field quantity,
+# and the X/Y/Z labels already tell the axes apart.
+_NEUTRAL = (0.60, 0.60, 0.60, 1.0)
+_AXIS_X = _AXIS_Y = _AXIS_Z = _NEUTRAL
 
 def _c2hex(r, g, b, *_): return f'#{int(r*255):02x}{int(g*255):02x}{int(b*255):02x}'
 
@@ -241,13 +245,13 @@ class MainWindow(QMainWindow):
         # Source position marker for wave 2
         self.source2_marker = gl.GLScatterPlotItem(
             pos=np.array([[0.0, 0.0, 0.0]]),
-            color=(1.0, 0.85, 0.0, 1.0),
+            color=_NEUTRAL,
             size=14,
             pxMode=True,
         )
         self.source2_marker.setVisible(False)
         self.view.addItem(self.source2_marker)
-        self.text_source2 = gl.GLTextItem(pos=(0, 0, 0), text='Дж.2', color=_txt_rgba((1.0, 0.85, 0.0, 1.0)))
+        self.text_source2 = gl.GLTextItem(pos=(0, 0, 0), text='Дж.2', color=_txt_rgba(_NEUTRAL))
         self.text_source2.setVisible(False)
         self.view.addItem(self.text_source2)
 
@@ -332,7 +336,7 @@ class MainWindow(QMainWindow):
             panel = (f"<b>Хвиля 1:</b><br>"
                      f"<font color='{e1h}'>■ E — електричне поле</font><br>"
                      f"<font color='{b1h}'>■ B — магнітне поле</font><br>"
-                     "<font color='gray'>─ Осі: X(фіолет.) Y(малин.) Z(корич.)</font>")
+                     "<font color='gray'>─ Осі: сірі, підписані X, Y, Z</font>")
         elif idx == 1:
             strip = (f"<b>Хвиля&nbsp;2:</b>&nbsp;&nbsp;"
                      f"<font color='{e2h}'>■&nbsp;E</font>&nbsp;&nbsp;"
@@ -343,7 +347,7 @@ class MainWindow(QMainWindow):
                      f"<font color='{e2h}'>■ E — електричне поле</font><br>"
                      f"<font color='{b2h}'>■ B — магнітне поле</font><br>"
                      f"<font color='{s2h}'>■ S — вектор Пойнтінга</font><br>"
-                     "<font color='gray'>─ Осі: X(фіолет.) Y(малин.) Z(корич.)</font>")
+                     "<font color='gray'>─ Осі: сірі, підписані X, Y, Z</font>")
         else:
             strip = (f"<b>Хвиля&nbsp;1:</b>&nbsp;"
                      f"<font color='{e1h}'>■E₁</font>&nbsp;"
@@ -368,7 +372,7 @@ class MainWindow(QMainWindow):
                      "<font color='gray'>● посередині — точка зустрічі фронтів</font><br>"
                      "<font color='gray'>→ там же: миттєві E₁, B₁, E₂, B₂ та EΣ, BΣ "
                      "у масштабі поля</font><br>"
-                     "<font color='gray'>─ Осі: X(фіолет.) Y(малин.) Z(корич.)</font>")
+                     "<font color='gray'>─ Осі: сірі, підписані X, Y, Z</font>")
         self.legend_strip.setText(strip)
         self.legend_label.setText(panel)
 
@@ -1347,7 +1351,7 @@ class MainWindow(QMainWindow):
             if show_sum:
                 overlap = wave1.active & wave2.active
                 alone1, alone2 = wave1.active & ~overlap, wave2.active & ~overlap
-                dim = _DIM_ALPHA
+                dim = _DIM_ALPHA if overlap.any() else 1.0   # dim only under a combined field
             else:
                 overlap = np.zeros(self.z_steps, dtype=bool)
                 alone1, alone2 = wave1.active, wave2.active
