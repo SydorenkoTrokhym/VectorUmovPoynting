@@ -23,24 +23,24 @@ def calculate_fields(
     """
     omega_c = 2 * np.pi * frequency
     omega_m = 2 * np.pi * mod_freq
-    k_c = direction * (omega_c / C)
     phi = np.radians(phase_shift)
 
-    # Adjusted z for the wave source position
+    # Retarded time makes both the carrier and its modulation propagate.
     z_adj = z - z_offset
+    tau = t - direction * z_adj / C
     
     if modulation_type == 'AM':
-        amp_t = amplitude * (1 + mod_index * np.cos(omega_m * t))
-        phase = omega_c * t - k_c * z_adj + phi
+        amp_t = amplitude * (1 + mod_index * np.cos(omega_m * tau))
+        phase = omega_c * tau + phi
     elif modulation_type == 'FM':
         amp_t = amplitude
-        phase = omega_c * t - k_c * z_adj + mod_index * np.sin(omega_m * t) + phi
+        phase = omega_c * tau + mod_index * np.sin(omega_m * tau) + phi
     elif modulation_type == 'AFM':
-        amp_t = amplitude * (1 + mod_index * np.cos(omega_m * t))
-        phase = omega_c * t - k_c * z_adj + mod_index * np.sin(omega_m * t) + phi
+        amp_t = amplitude * (1 + mod_index * np.cos(omega_m * tau))
+        phase = omega_c * tau + mod_index * np.sin(omega_m * tau) + phi
     else:
         amp_t = amplitude
-        phase = omega_c * t - k_c * z_adj + phi
+        phase = omega_c * tau + phi
 
     if polarization == 'circular_right':
         E0x = -amp_t * np.sin(phase)
@@ -88,3 +88,14 @@ def calculate_poynting(
     Sz = (Ex * By - Ey * Bx) / MU0
     return Sx, Sy, Sz
 
+
+def calculate_poynting_3d(
+    electric: NDArray[np.float64],
+    magnetic: NDArray[np.float64],
+) -> NDArray[np.float64]:
+    """Return S = E x B / mu0 for arrays whose final dimension is XYZ."""
+    electric = np.asarray(electric, dtype=float)
+    magnetic = np.asarray(magnetic, dtype=float)
+    if electric.shape != magnetic.shape or electric.shape[-1] != 3:
+        raise ValueError("electric and magnetic must have equal (..., 3) shapes")
+    return np.cross(electric, magnetic) / MU0
