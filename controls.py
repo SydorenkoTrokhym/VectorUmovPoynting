@@ -7,6 +7,8 @@ from PyQt6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QGroupBox,
                               QWidget)
 
 from camera import BG_COLORS
+from models import DEFAULT_SOURCE_SEPARATION
+from persistence import SEPARATION_RANGE
 
 
 def build_controls(window, layout: QLayout) -> None:
@@ -141,6 +143,25 @@ def build_controls(window, layout: QLayout) -> None:
         pos_row2.addWidget(spin)
     source_position_layout.addLayout(pos_row2)
     src_layout.addWidget(window.source_position_widget)
+
+    # Superposition only: distance between the sources
+    window.separation_widget = QWidget()
+    separation_layout = QHBoxLayout(window.separation_widget)
+    separation_layout.setContentsMargins(0, 0, 0, 0)
+    separation_layout.addWidget(QLabel("Відстань між джерелами:"))
+    window.separation_spin = QDoubleSpinBox()
+    window.separation_spin.setRange(*SEPARATION_RANGE)
+    window.separation_spin.setSingleStep(0.5)
+    window.separation_spin.setDecimals(2)
+    window.separation_spin.setSuffix(" λ")
+    window.separation_spin.setValue(DEFAULT_SOURCE_SEPARATION)
+    window.separation_spin.setToolTip(
+        "Джерело 1 — у початку координат; джерело 2 — у напрямку, заданому на вкладці "
+        "«Хвиля 2». Фронти зустрічаються через половину цієї відстані в періодах T.")
+    window.separation_spin.valueChanged.connect(window._on_separation_changed)
+    separation_layout.addWidget(window.separation_spin)
+    window.separation_widget.setVisible(False)
+    src_layout.addWidget(window.separation_widget)
 
     # Superposition only: jump to characteristic moments after both sources switch on
     window.superposition_time_widget = QWidget()

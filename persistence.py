@@ -5,7 +5,8 @@ from typing import Any
 
 import numpy as np
 
-from models import ScenarioConfiguration, VisualizationSettings, WaveParameters
+from models import (DEFAULT_SOURCE_SEPARATION, ScenarioConfiguration,
+                    VisualizationSettings, WaveParameters)
 from geometry import field_directions
 
 SCHEMA_VERSION = 2
@@ -13,6 +14,7 @@ POLARIZATIONS = {"linear", "circular_right", "circular_left", "elliptical"}
 MODULATIONS = {"none", "AM", "FM", "AFM"}
 DIRECTIONS = {"+Z", "-Z", "+X", "-X", "+Y", "-Y"}
 DIRECTION_MODES = {"Базова вісь", "Довільний вектор"}
+SEPARATION_RANGE = (0.5, 20.0)   # distance between superposition sources, in λ
 
 
 class ConfigurationError(ValueError):
@@ -24,6 +26,7 @@ def configuration_to_dict(configuration: ScenarioConfiguration) -> dict[str, Any
         "schema_version": SCHEMA_VERSION,
         "waves": [wave.to_dict() for wave in configuration.waves],
         "visualization": asdict(configuration.visualization),
+        "source_separation": configuration.source_separation,
     }
 
 
@@ -76,7 +79,12 @@ def configuration_from_dict(raw: Any) -> ScenarioConfiguration:
         raise ConfigurationError(f"Invalid visualization settings: {exc}") from exc
     if not 10 <= visualization.pixels_per_wavelength <= 2000:
         raise ConfigurationError("pixels_per_wavelength must be in [10, 2000]")
-    return ScenarioConfiguration(waves, visualization)
+    separation = raw.get("source_separation", DEFAULT_SOURCE_SEPARATION)
+    if (not isinstance(separation, (int, float)) or isinstance(separation, bool)
+            or not SEPARATION_RANGE[0] <= separation <= SEPARATION_RANGE[1]):
+        raise ConfigurationError(
+            f"source_separation must be a number in [{SEPARATION_RANGE[0]}, {SEPARATION_RANGE[1]}]")
+    return ScenarioConfiguration(waves, visualization, float(separation))
 
 
 def _parse_wave(data: Any, index: int) -> WaveParameters:

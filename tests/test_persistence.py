@@ -44,6 +44,21 @@ class PersistenceTests(unittest.TestCase):
         with self.assertRaises(ConfigurationError):
             configuration_from_dict({"schema_version": 99})
 
+    def test_source_separation_round_trip_and_default(self):
+        original = ScenarioConfiguration(source_separation=5.5)
+        self.assertEqual(configuration_from_dict(configuration_to_dict(original)), original)
+        data = configuration_to_dict(ScenarioConfiguration())
+        del data["source_separation"]
+        self.assertEqual(configuration_from_dict(data).source_separation, 8.0)
+
+    def test_invalid_source_separation_is_rejected(self):
+        for value in (0.0, 25.0, "8", True):
+            with self.subTest(value=value):
+                data = configuration_to_dict(ScenarioConfiguration())
+                data["source_separation"] = value
+                with self.assertRaises(ConfigurationError):
+                    configuration_from_dict(data)
+
     def test_earlier_v2_without_field_directions_is_compatible(self):
         data = configuration_to_dict(ScenarioConfiguration())
         for wave in data["waves"]:

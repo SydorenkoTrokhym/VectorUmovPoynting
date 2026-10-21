@@ -1,6 +1,7 @@
 import os
 import sys
 import unittest
+from dataclasses import replace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -64,7 +65,8 @@ class MainWindowSmokeTests(unittest.TestCase):
         window.t = 0.137
         p1, p2 = window.scenario_params
         superposition = simulate_counterpropagating(
-            p1, p2, window.t, steps=window.z_steps, switch_on_time=0.0)
+            p1, replace(p2, source_position=(0.0, 0.0, 8.0)), window.t,
+            steps=window.z_steps, switch_on_time=0.0)
         cases = (
             (0, window.e_curve, simulate_wave(p1, window.t, steps=window.z_steps)),
             (1, window.e_curve2, simulate_wave(p2, window.t, steps=window.z_steps)),
@@ -85,17 +87,29 @@ class MainWindowSmokeTests(unittest.TestCase):
         window = self.window
         window.scenario_tabs.setCurrentIndex(2)
         p1, p2 = window.scenario_params
-        gap = float(np.linalg.norm(p2.source_position))
+        gap = 8.0   # default distance between the sources, in λ
+        self.assertEqual(window.separation_spin.value(), gap)
+        p2 = replace(p2, source_position=(0.0, 0.0, gap))
         combined_e = window.combined_renderer.electric_curve
 
         window._on_time_preset("start")
-        self.assertAlmostEqual(window.t, gap / 4)
+        self.assertAlmostEqual(window.t, 2.0)
         self.assertTrue(window.e_curve.visible() and window.e_curve2.visible())
         self.assertFalse(combined_e.visible())   # the fronts have not met yet
 
+        self.assertFalse(any(label.visible() for label in window.meet_labels))
+
         window._on_time_preset("meet")
-        self.assertAlmostEqual(window.t, gap / 2)
+        self.assertAlmostEqual(window.t, 4.0)   # 8 λ apart → fronts meet after 4 T
         self.assertIn("зустрічаються", window.time_status.text())
+        meet_labels = {label.text: np.asarray(label.pos)
+                       for label in window.meet_labels if label.visible()}
+        self.assertEqual(sorted(meet_labels), ["B₁", "B₂", "E₁", "E₂", "k₁", "k₂"])
+        for position in meet_labels.values():
+            self.assertLess(np.linalg.norm(position - [0.0, 0.0, gap / 2]), 0.5)
+        # The two waves' k vectors at the meeting point face each other.
+        self.assertGreater(meet_labels["k₁"][2], gap / 2)
+        self.assertLess(meet_labels["k₂"][2], gap / 2)
 
         window._on_time_preset("later")
         self.assertTrue(window._paused)
@@ -113,6 +127,23 @@ class MainWindowSmokeTests(unittest.TestCase):
         window.scenario_tabs.setCurrentIndex(0)
         window.update_plot()
         self.assertFalse(combined_e.visible())
+        self.assert_no_errors()
+
+    def test_separation_moves_source_two_and_meeting_time(self):
+        window = self.window
+        window.scenario_tabs.setCurrentIndex(2)
+        self.assertTrue(window.separation_widget.isVisible())
+        self.assertFalse(window.source_position_widget.isVisible())
+        window.separation_spin.setValue(5.0)
+        self.assertEqual(window.configuration.source_separation, 5.0)
+        np.testing.assert_allclose(window.source2_marker.pos, [[0.0, 0.0, 5.0]])
+        np.testing.assert_allclose(window.meeting_marker.pos, [[0.0, 0.0, 2.5]])
+        window._on_time_preset("meet")
+        self.assertAlmostEqual(window.t, 2.5)
+        # Wave 2's own tab keeps its own source position.
+        window.scenario_tabs.setCurrentIndex(1)
+        self.assertTrue(window.source_position_widget.isVisible())
+        self.assertEqual(window.scenario_params[1].source_position, (0.0, 0.0, 2.0))
         self.assert_no_errors()
 
     def test_animation_step_and_reset(self):

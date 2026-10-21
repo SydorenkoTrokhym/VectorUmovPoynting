@@ -4,6 +4,9 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 
+DEFAULT_SOURCE_SEPARATION = 8.0   # λ; the fronts then meet after 4 T
+
+
 @dataclass(slots=True)
 class WaveParameters:
     polarization: str = "linear"
@@ -48,3 +51,6 @@ class ScenarioConfiguration:
         ),
     ])
     visualization: VisualizationSettings = field(default_factory=VisualizationSettings)
+    # Superposition tab: distance between the two sources, in wavelengths. Source 2 lies
+    # in the direction of wave 2's source position, at this distance from the origin.
+    source_separation: float = DEFAULT_SOURCE_SEPARATION

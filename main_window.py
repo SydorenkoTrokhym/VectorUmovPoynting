@@ -212,6 +212,13 @@ class MainWindow(QMainWindow):
             pos=np.zeros((1, 3)), color=(0.8, 0.8, 0.8, 0.8), size=9, pxMode=True)
         self.meeting_marker.setVisible(False)
         self.view.addItem(self.meeting_marker)
+        # k/E/B labels for both waves' triads at the meeting point
+        self.meet_labels = []
+        for _ in range(6):
+            label = gl.GLTextItem(pos=(0, 0, 0), text='')
+            label.setVisible(False)
+            self.view.addItem(label)
+            self.meet_labels.append(label)
 
         # Source position marker for wave 2
         self.source2_marker = gl.GLScatterPlotItem(
@@ -358,11 +365,34 @@ class MainWindow(QMainWindow):
     def _on_time_preset(self, preset):
         """Jump to a characteristic moment of the superposition: fronts just left their
         sources, fronts meet midway, or the waves overlap along the whole gap."""
-        gap = float(np.linalg.norm(self.scenario_params[1].source_position))  # in λ
+        gap = self.configuration.source_separation  # in λ
         # "later": full overlap, offset T/8 from the instant where in-phase sources
         # give E Σ = 0 everywhere, so both E Σ and B Σ are visible.
         periods = {"start": gap / 4, "meet": gap / 2, "later": gap + 0.625}[preset]
         self._set_time(periods / _CARRIER_FREQUENCY)
+
+    def _on_separation_changed(self, value):
+        if self._is_updating:
+            return
+        self.configuration.source_separation = value
+        self._center_on_meeting_point()
+        self.update_plot()
+
+    def _center_on_meeting_point(self):
+        """Superposition camera looks at the midpoint between the sources."""
+        midpoint = np.asarray(self._superposition_wave2().source_position) / 2
+        self.view.opts['center'] = pg.Vector(*midpoint)
+        self.view.update()
+
+    def _superposition_wave2(self):
+        """Wave 2 as used by the superposition tab: its source sits at the configured
+        separation, in the direction of wave 2's own source position (+Z if unset)."""
+        p2 = self.scenario_params[1]
+        direction = np.asarray(p2.source_position, dtype=float)
+        norm = np.linalg.norm(direction)
+        unit = direction / norm if norm > 1e-9 else np.array([0.0, 0.0, 1.0])
+        position = unit * self.configuration.source_separation
+        return replace(p2, source_position=tuple(float(v) for v in position))
 
     def _on_time_step(self, sign):
         self._set_time(max(self.t + sign * _TIME_STEP / _CARRIER_FREQUENCY, 0.0))
@@ -408,6 +438,7 @@ class MainWindow(QMainWindow):
             self._apply_wave2_camera()
         else:
             self._apply_default_camera()
+            self._center_on_meeting_point()
 
         # Tab 2 (index==2) = superposition
         is_superposition = index == 2
@@ -417,17 +448,17 @@ class MainWindow(QMainWindow):
         # Wave 2 uses a free source position; superposition uses only source separation.
         self.source_group.setVisible(index >= 1)
         self.source_group.setTitle("Позиція джерела 2" if index == 1 else "Параметри суперпозиції")
-        self.source_position_widget.setVisible(index >= 1)
+        self.source_position_widget.setVisible(index == 1)
+        self.separation_widget.setVisible(is_superposition)
         self.superposition_time_widget.setVisible(is_superposition)
 
         self._update_legend(index)
         if is_superposition:
             self._is_updating = True
-            source = self.scenario_params[1].source_position
-            self.x0_spin.setValue(source[0])
-            self.y0_spin.setValue(source[1])
-            self.z0_spin.setValue(source[2])
-            self._is_updating = False
+            try:
+                self.separation_spin.setValue(self.configuration.source_separation)
+            finally:
+                self._is_updating = False
             self.update_plot()
             return
 
@@ -817,11 +848,14 @@ class MainWindow(QMainWindow):
                 # Wave 1 starts at the origin; wave 2 starts at its XYZ point in lambda.
                 # Their directions are derived from the line connecting the two sources.
                 # Both sources switch on at t = 0, so each front leaves its own source.
+                source2_params = self._superposition_wave2()
                 combined = simulate_counterpropagating(
-                    p1, p2, self.t, frequency=freq, steps=self.z_steps, switch_on_time=0.0)
+                    p1, source2_params, self.t, frequency=freq, steps=self.z_steps,
+                    switch_on_time=0.0)
                 wave1, wave2 = combined.wave1, combined.wave2
                 table_vectors = (combined.electric, combined.magnetic_h, combined.poynting)
-                n_act = float(np.linalg.norm(p2.source_position))
+                source2_v = np.asarray(source2_params.source_position)
+                n_act = self.configuration.source_separation
                 z_max = (n_act + 1.0) * wavelength
                 self.time_status.setText(self._superposition_time_text(n_act, self.t * freq))
             else:
@@ -829,6 +863,7 @@ class MainWindow(QMainWindow):
                 wave1 = simulate_wave(replace(p1, source_position=(0.0, 0.0, 0.0)),
                                       self.t, frequency=freq, steps=self.z_steps)
                 wave2 = simulate_wave(p2, self.t, frequency=freq, steps=self.z_steps)
+                source2_v = np.asarray(p2.source_position, dtype=float)
                 shown, shown_params = (wave1, p1) if scenario_idx == 0 else (wave2, p2)
                 table_vectors = (shown.electric, shown.magnetic_h, shown.poynting)
                 n_act = shown_params.periods
@@ -848,7 +883,7 @@ class MainWindow(QMainWindow):
             pos1_v  = wave1.positions / wavelength
             pos2_v  = wave2.positions / wavelength
             off1_v  = np.zeros(3)
-            off2_v  = np.asarray(p2.source_position, dtype=float)
+            off2_v  = source2_v
 
             # Fixed physical→view-unit scale factors for E/B/S deflection (3D-view units
             # per V/m, etc.). These must NOT depend on amp1/amp2 — earlier they were
@@ -988,6 +1023,9 @@ class MainWindow(QMainWindow):
 
             # hide wave-2 text labels by default; superposition re-enables them
             self.text_e2.setVisible(False); self.text_b2.setVisible(False)
+            if scenario_idx != 2:
+                for label in self.meet_labels:
+                    label.setVisible(False)
             if scenario_idx == 0:
                 # Tab 1: wave components only — no k/E/B reference arrows, labels sit on the axes
                 self.k_indicator.setVisible(False)
@@ -1019,9 +1057,33 @@ class MainWindow(QMainWindow):
                 k_clr = np.vstack([np.tile(_W1_K, (len(kp1), 1)), np.tile(_W2_K, (len(kp2), 1))])
                 e_clr = np.vstack([np.tile(_W1_E, (len(ep1), 1)), np.tile(_W2_E, (len(ep2), 1))])
                 b_clr = np.vstack([np.tile(_W1_B, (len(bp1), 1)), np.tile(_W2_B, (len(bp2), 1))])
-                self.k_indicator.setData(pos=np.vstack([kp1, kp2]), color=k_clr)
-                self.e_indicator.setData(pos=np.vstack([ep1, ep2]), color=e_clr)
-                self.b_indicator.setData(pos=np.vstack([bp1, bp2]), color=b_clr)
+                k_pts, e_pts, b_pts = [kp1, kp2], [ep1, ep2], [bp1, bp2]
+                # Once the fronts have met, repeat both waves' k/E/B triads at the meeting
+                # point. Each triad is nudged toward its own source so the parallel E arrows
+                # of the two waves stay distinguishable.
+                met = self.t * freq >= n_act / 2 - 1e-9
+                meet_point = off2_v / 2
+                labels = []
+                if met:
+                    nudge = 0.06 * k1
+                    for origin, frame, colors, idx in (
+                            (meet_point - nudge, wave1.frame, (_W1_K, _W1_E, _W1_B), '₁'),
+                            (meet_point + nudge, wave2.frame, (_W2_K, _W2_E, _W2_B), '₂')):
+                        kp, ep, bp, kl, el, bl = _build_indicators(origin, *frame)
+                        k_pts.append(kp); e_pts.append(ep); b_pts.append(bp)
+                        k_clr = np.vstack([k_clr, np.tile(colors[0], (len(kp), 1))])
+                        e_clr = np.vstack([e_clr, np.tile(colors[1], (len(ep), 1))])
+                        b_clr = np.vstack([b_clr, np.tile(colors[2], (len(bp), 1))])
+                        labels += [(kl, 'k' + idx, colors[0]), (el, 'E' + idx, colors[1]),
+                                   (bl, 'B' + idx, colors[2])]
+                for label, (pos, text, color) in zip(self.meet_labels, labels):
+                    label.setData(pos=tuple(pos), text=text, color=_txt_rgba(color))
+                    label.setVisible(True)
+                for label in self.meet_labels[len(labels):]:
+                    label.setVisible(False)
+                self.k_indicator.setData(pos=np.vstack(k_pts), color=k_clr)
+                self.e_indicator.setData(pos=np.vstack(e_pts), color=e_clr)
+                self.b_indicator.setData(pos=np.vstack(b_pts), color=b_clr)
                 self.text_k.setData(pos=tuple(kl1), color=_txt_rgba(_W1_K), text='k₁')
                 self.text_e.setData(pos=tuple(el1),  color=_txt_rgba(_W1_E), text='E₁'); self.text_e.setVisible(True)
                 self.text_b.setData(pos=tuple(bl1),  color=_txt_rgba(_W1_B), text='B₁'); self.text_b.setVisible(True)
