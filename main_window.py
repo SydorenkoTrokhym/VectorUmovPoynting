@@ -50,6 +50,8 @@ _W2_K = (0.60, 1.00, 0.30, 1.0)   # light green — wave 2 propagation
 _SUM_E = (0.30, 0.60, 1.00, 1.0)  # blue   — E₁ + E₂
 _SUM_B = (1.00, 0.30, 0.30, 1.0)  # red    — B₁ + B₂
 _SUM_S = (1.00, 0.80, 0.00, 1.0)  # gold   — S of the combined field
+_MEET_FIELD_SHIFT = 0.15  # λ; offset of each wave's E/B arrows at the meeting point
+_MEET_FIELD_MIN = 1e-3    # λ; shorter field arrows (e.g. a node) are not drawn
 _DIM_ALPHA = 0.30                 # individual waves while the combined field is shown
 
 # The carrier is fixed at 1 Hz: one period T is 1 s, and a front advances 1 λ per T.
@@ -219,6 +221,18 @@ class MainWindow(QMainWindow):
             label.setVisible(False)
             self.view.addItem(label)
             self.meet_labels.append(label)
+        # Field-sized E/B arrows at the meeting point: each wave's and their sum
+        self.meet_field_arrows = gl.GLLinePlotItem(width=3, mode='lines', glOptions='translucent')
+        self.meet_sum_arrows = gl.GLLinePlotItem(width=5, mode='lines', glOptions='translucent')
+        self.meet_field_labels = []
+        for item in (self.meet_field_arrows, self.meet_sum_arrows):
+            item.setVisible(False)
+            self.view.addItem(item)
+        for _ in range(6):
+            label = gl.GLTextItem(pos=(0, 0, 0), text='')
+            label.setVisible(False)
+            self.view.addItem(label)
+            self.meet_field_labels.append(label)
 
         # Source position marker for wave 2
         self.source2_marker = gl.GLScatterPlotItem(
@@ -348,6 +362,8 @@ class MainWindow(QMainWindow):
                      f"<font color='{seh}'>▬</font><font color='{sbh}'>▬</font><font color='{ssh}'>▬</font>"
                      " Σ — сумарне поле в зоні перекриття (окремі хвилі приглушені)<br>"
                      "<font color='gray'>● посередині — точка зустрічі фронтів</font><br>"
+                     "<font color='gray'>→ там же: миттєві E₁, B₁, E₂, B₂ та EΣ, BΣ "
+                     "у масштабі поля</font><br>"
                      "<font color='gray'>─ Осі: X(фіолет.) Y(малин.) Z(корич.)</font>")
         self.legend_strip.setText(strip)
         self.legend_label.setText(panel)
@@ -801,6 +817,67 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Axis permutation: local (t1, t2, prop) → world (x, y, z)
     # ------------------------------------------------------------------
+
+    def _draw_meeting_field_arrows(self, visible, positions, meet_point, k_hat,
+                                   wave_vectors, sum_vectors, show_e, show_b):
+        """Draw the instantaneous E/B of both waves and their sum at the meeting point.
+
+        The vectors are taken at the sample nearest the meeting point and use the same
+        scale as the field curves, so the Σ arrows end on the combined curves. Each
+        wave's own arrows are shifted toward its source (wave 1 at −k₁, wave 2 at +k₁),
+        otherwise the equal E₁ and E₂ there would be drawn on top of each other.
+        """
+        labels = []
+        if visible:
+            idx = int(np.argmin(np.linalg.norm(positions - meet_point, axis=1)))
+            base = positions[idx]
+            e1, b1, e2, b2 = (v[idx] for v in wave_vectors)
+            se, sb = (v[idx] for v in sum_vectors)
+            shift = _MEET_FIELD_SHIFT * k_hat
+            groups = (
+                (self.meet_field_arrows, (
+                    (base - shift, e1, _W1_E, 'E₁', show_e), (base - shift, b1, _W1_B, 'B₁', show_b),
+                    (base + shift, e2, _W2_E, 'E₂', show_e), (base + shift, b2, _W2_B, 'B₂', show_b))),
+                (self.meet_sum_arrows, (
+                    (base, se, _SUM_E, 'EΣ', show_e), (base, sb, _SUM_B, 'BΣ', show_b))),
+            )
+        else:
+            groups = ((self.meet_field_arrows, ()), (self.meet_sum_arrows, ()))
+        for item, arrows in groups:
+            points, colors = [], []
+            for origin, vector, color, text, shown in arrows:
+                length = np.linalg.norm(vector)
+                if not shown or length < _MEET_FIELD_MIN:
+                    continue
+                pts = self._field_arrow_points(origin, vector)
+                points.append(pts)
+                colors.append(np.tile(color, (len(pts), 1)))
+                tip = origin + vector * (1 + 0.08 / length)
+                labels.append((tip, text, color))
+            item.setVisible(bool(points))
+            if points:
+                item.setData(pos=np.vstack(points), color=np.vstack(colors))
+        for label, (pos, text, color) in zip(self.meet_field_labels, labels):
+            label.setData(pos=tuple(pos), text=text, color=_txt_rgba(color))
+            label.setVisible(True)
+        for label in self.meet_field_labels[len(labels):]:
+            label.setVisible(False)
+
+    @staticmethod
+    def _field_arrow_points(origin, vector):
+        """Line-segment points for an arrow whose head shrinks with short vectors."""
+        length = np.linalg.norm(vector)
+        d_hat = vector / length
+        head = min(0.3 * length, 0.06)
+        up = np.array([0.0, 0.0, 1.0]) if abs(d_hat[2]) < 0.9 else np.array([0.0, 1.0, 0.0])
+        side1 = np.cross(d_hat, up)
+        side1 *= 0.4 * head / np.linalg.norm(side1)
+        side2 = np.cross(d_hat, side1)
+        tip = origin + vector
+        neck = tip - d_hat * head
+        return np.array([origin, tip,
+                         tip, neck + side1, tip, neck - side1,
+                         tip, neck + side2, tip, neck - side2])
 
     def _get_perm(self):
         axis = self.prop_axis_combo.currentText()
@@ -1273,6 +1350,10 @@ class MainWindow(QMainWindow):
             else:
                 for item in self.combined_renderer.items():
                     item.setVisible(False)
+            self._draw_meeting_field_arrows(
+                show_sum and (wave1.active & wave2.active).any(), pos1_v, off2_v / 2, k1,
+                (e1_v, b1_v, e2_v, b2_v),
+                (sum_e_v, sum_b_v) if show_sum else None, show_e, show_b)
 
         except ValueError as exc:
             self.params_status.setText(f"Помилка обчислення: {exc}")

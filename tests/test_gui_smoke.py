@@ -129,6 +129,47 @@ class MainWindowSmokeTests(unittest.TestCase):
         self.assertFalse(combined_e.visible())
         self.assert_no_errors()
 
+    def test_meeting_point_field_arrows_match_the_fields_there(self):
+        window = self.window
+        window.scenario_tabs.setCurrentIndex(2)
+        gap = window.configuration.source_separation
+        window._on_time_preset("start")
+        self.assertFalse(window.meet_field_arrows.visible())
+        self.assertFalse(window.meet_sum_arrows.visible())
+
+        window._set_time(gap / 2 + 0.3)   # fronts met 0.3 T ago; fields are non-zero there
+        p1, p2 = window.scenario_params
+        result = simulate_counterpropagating(
+            p1, replace(p2, source_position=(0.0, 0.0, gap)), window.t,
+            steps=window.z_steps, switch_on_time=0.0)
+        positions = result.positions / WAVELENGTH
+        idx = int(np.argmin(np.linalg.norm(positions - [0.0, 0.0, gap / 2], axis=1)))
+        base = positions[idx]
+        # Σ arrows start on the axis and end on the combined E/B curves.
+        sum_pos = window.meet_sum_arrows.pos
+        expected_tips = [base + result.electric[idx] * FIELD_VIEW_SCALE,
+                         base + result.magnetic[idx] * C * FIELD_VIEW_SCALE]
+        tips = [sum_pos[i + 1] for i in range(0, len(sum_pos), 10)]
+        np.testing.assert_allclose(tips, expected_tips[:len(tips)], atol=1e-9)
+        # Each wave's E arrow has that wave's E there, shifted toward its own source.
+        field_pos = window.meet_field_arrows.pos
+        e1_start, e1_tip = field_pos[0], field_pos[1]
+        np.testing.assert_allclose(e1_tip - e1_start,
+                                   result.wave1.electric[idx] * FIELD_VIEW_SCALE, atol=1e-9)
+        self.assertLess(e1_start[2], base[2])
+        texts = {label.text for label in window.meet_field_labels if label.visible()}
+        self.assertTrue({"E₁", "E₂", "EΣ"} <= texts, texts)
+
+        window.comp_combo.setCurrentText("Магнітна (B)")
+        window.update_plot()
+        texts = {label.text for label in window.meet_field_labels if label.visible()}
+        self.assertFalse(texts & {"E₁", "E₂", "EΣ"})
+        window.scenario_tabs.setCurrentIndex(0)
+        window.update_plot()
+        self.assertFalse(window.meet_sum_arrows.visible())
+        self.assertFalse(any(label.visible() for label in window.meet_field_labels))
+        self.assert_no_errors()
+
     def test_separation_moves_source_two_and_meeting_time(self):
         window = self.window
         window.scenario_tabs.setCurrentIndex(2)
