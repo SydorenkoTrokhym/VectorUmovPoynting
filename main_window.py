@@ -12,7 +12,8 @@ from PyQt6.QtCore import Qt, QTimer, QRect
 import pyqtgraph.opengl as gl
 
 import camera
-from camera import BG_COLORS as _BG_COLORS, txt_rgba as _txt_rgba
+from camera import (BG_COLORS as _BG_COLORS, txt_rgba as _txt_rgba,
+                    _WAVE1_CAMERA_ROTATION, _WAVE2_CAMERA_ROTATION)
 from controls import build_controls
 from geometry import build_surface_faces, wave_frame
 from models import ScenarioConfiguration, VisualizationSettings
