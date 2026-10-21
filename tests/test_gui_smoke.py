@@ -11,6 +11,8 @@ from main_window import FIELD_VIEW_SCALE, MainWindow
 from physics import C
 from simulation import simulate_counterpropagating, simulate_wave
 
+WAVELENGTH = C / 1.0   # the window's carrier is fixed at 1 Hz
+
 
 class MainWindowSmokeTests(unittest.TestCase):
     """Build the real window and drive it through every tab and mode.
@@ -61,22 +63,56 @@ class MainWindowSmokeTests(unittest.TestCase):
         window = self.window
         window.t = 0.137
         p1, p2 = window.scenario_params
-        wavelength = C / 1.0
+        superposition = simulate_counterpropagating(
+            p1, p2, window.t, steps=window.z_steps, switch_on_time=0.0)
         cases = (
             (0, window.e_curve, simulate_wave(p1, window.t, steps=window.z_steps)),
             (1, window.e_curve2, simulate_wave(p2, window.t, steps=window.z_steps)),
-            (2, window.e_curve, simulate_counterpropagating(
-                p1, p2, window.t, steps=window.z_steps).wave1),
-            (2, window.e_curve2, simulate_counterpropagating(
-                p1, p2, window.t, steps=window.z_steps).wave2),
+            (2, window.e_curve, superposition.wave1),
+            (2, window.e_curve2, superposition.wave2),
         )
         for index, curve, field in cases:
             with self.subTest(tab=index, curve=curve):
                 window.scenario_tabs.setCurrentIndex(index)
                 window.t = 0.137
                 window.update_plot()
-                expected = field.positions / wavelength + field.electric * FIELD_VIEW_SCALE
+                expected = (field.positions / WAVELENGTH
+                            + field.electric * FIELD_VIEW_SCALE)[field.active]
                 np.testing.assert_allclose(curve.pos, expected, atol=1e-9)
+        self.assert_no_errors()
+
+    def test_superposition_presets_show_fronts_then_combined_field(self):
+        window = self.window
+        window.scenario_tabs.setCurrentIndex(2)
+        p1, p2 = window.scenario_params
+        gap = float(np.linalg.norm(p2.source_position))
+        combined_e = window.combined_renderer.electric_curve
+
+        window._on_time_preset("start")
+        self.assertAlmostEqual(window.t, gap / 4)
+        self.assertTrue(window.e_curve.visible() and window.e_curve2.visible())
+        self.assertFalse(combined_e.visible())   # the fronts have not met yet
+
+        window._on_time_preset("meet")
+        self.assertAlmostEqual(window.t, gap / 2)
+        self.assertIn("зустрічаються", window.time_status.text())
+
+        window._on_time_preset("later")
+        self.assertTrue(window._paused)
+        self.assertTrue(combined_e.visible())
+        result = simulate_counterpropagating(
+            p1, p2, window.t, steps=window.z_steps, switch_on_time=0.0)
+        overlap = result.wave1.active & result.wave2.active
+        self.assertTrue(overlap.all())
+        expected = (result.positions / WAVELENGTH
+                    + result.electric * FIELD_VIEW_SCALE)[overlap]
+        np.testing.assert_allclose(combined_e.pos, expected, atol=1e-9)
+
+        window._on_time_step(-1)
+        self.assertAlmostEqual(window.t, gap + 0.625 - 0.05)
+        window.scenario_tabs.setCurrentIndex(0)
+        window.update_plot()
+        self.assertFalse(combined_e.visible())
         self.assert_no_errors()
 
     def test_animation_step_and_reset(self):

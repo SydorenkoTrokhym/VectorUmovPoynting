@@ -142,6 +142,35 @@ def build_controls(window, layout: QLayout) -> None:
     source_position_layout.addLayout(pos_row2)
     src_layout.addWidget(window.source_position_widget)
 
+    # Superposition only: jump to characteristic moments after both sources switch on
+    window.superposition_time_widget = QWidget()
+    time_layout = QVBoxLayout(window.superposition_time_widget)
+    time_layout.setContentsMargins(0, 0, 0, 0)
+    time_layout.addWidget(QLabel("Момент часу (джерела вмикаються при t = 0):"))
+    preset_row = QHBoxLayout()
+    for text, tooltip, preset in [
+        ("Старт", "Фронти щойно вийшли з джерел — видно орієнтацію джерел і напрямки хвиль", "start"),
+        ("Зустріч", "Фронти зустрічаються посередині між джерелами", "meet"),
+        ("Пізніше", "Хвилі перекриваються на всьому відрізку — сумарне поле", "later"),
+    ]:
+        button = QPushButton(text)
+        button.setToolTip(tooltip)
+        button.clicked.connect(lambda _checked=False, p=preset: window._on_time_preset(p))
+        preset_row.addWidget(button)
+    time_layout.addLayout(preset_row)
+    step_row = QHBoxLayout()
+    for text, sign in [("◀ −T/20", -1), ("+T/20 ▶", 1)]:
+        button = QPushButton(text)
+        button.clicked.connect(lambda _checked=False, s=sign: window._on_time_step(s))
+        step_row.addWidget(button)
+    time_layout.addLayout(step_row)
+    window.time_status = QLabel("")
+    window.time_status.setWordWrap(True)
+    window.time_status.setStyleSheet("font-size: 8pt;")
+    time_layout.addWidget(window.time_status)
+    window.superposition_time_widget.setVisible(False)
+    src_layout.addWidget(window.superposition_time_widget)
+
     window.source_group.setLayout(src_layout)
     window.source_group.setVisible(False)
     layout.addWidget(window.source_group)
@@ -167,6 +196,7 @@ def build_controls(window, layout: QLayout) -> None:
     viz_layout.addWidget(QLabel("Відображення компонент:"))
     window.comp_combo = QComboBox()
     window.comp_combo.addItems(["Узагальнений підхід", "Електрична (E)", "Магнітна (B)"])
+    window.comp_combo.currentTextChanged.connect(window._on_repr_changed)
     viz_layout.addWidget(window.comp_combo)
 
     viz_layout.addWidget(QLabel("Представлення:"))

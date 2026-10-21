@@ -18,6 +18,8 @@ class FieldResult:
     magnetic_h: NDArray[np.float64]
     poynting: NDArray[np.float64]
     frame: tuple[NDArray, NDArray, NDArray]
+    # True where the wave has reached the sample; fields are zero elsewhere.
+    active: NDArray[np.bool_]
 
 
 @dataclass(slots=True)
@@ -46,7 +48,8 @@ def simulate_wave(params: WaveParameters, time: float, frequency: float = 1.0, s
     magnetic = np.outer(bx, e1_hat) + np.outer(by, e2_hat)
     positions = origin + np.outer(distance, k_hat)
     return FieldResult(positions, electric, magnetic, magnetic / MU0,
-                       calculate_poynting_3d(electric, magnetic), frame)
+                       calculate_poynting_3d(electric, magnetic), frame,
+                       np.ones(steps, dtype=bool))
 
 
 def superpose(*fields: FieldResult) -> tuple[NDArray, NDArray, NDArray]:
@@ -63,12 +66,17 @@ def simulate_counterpropagating(
     time: float,
     frequency: float = 1.0,
     steps: int = 200,
+    switch_on_time: float | None = None,
 ) -> CounterpropagatingResult:
     """Evaluate two waves travelling toward each other between their sources.
 
     Source 1 is at the origin. Source 2 is positioned by ``wave2.source_position``
     in wavelength units. Directions are derived from the line connecting the sources;
     configured propagation directions are deliberately ignored in this scenario.
+
+    With ``switch_on_time`` set, both sources start emitting at that moment: each
+    wave is zero beyond its front, which leaves its own source at speed c. Without
+    it, both waves fill the whole gap (steady state).
     """
     wavelength = C / frequency
     source2 = np.asarray(wave2.source_position, dtype=float) * wavelength
@@ -96,11 +104,17 @@ def simulate_counterpropagating(
             params.phase_degrees, params.modulation_type,
             params.modulation_frequency, params.modulation_index,
         )
+        if switch_on_time is None:
+            active = np.ones(steps, dtype=bool)
+        else:
+            # Small tolerance so a front landing exactly on a sample counts as arrived.
+            front = C * (time - switch_on_time) + 1e-9 * wavelength
+            active = travelled <= front
         k_hat, e1_hat, e2_hat = frame
-        electric = np.outer(ex, e1_hat) + np.outer(ey, e2_hat)
-        magnetic = np.outer(bx, e1_hat) + np.outer(by, e2_hat)
+        electric = np.outer(ex * active, e1_hat) + np.outer(ey * active, e2_hat)
+        magnetic = np.outer(bx * active, e1_hat) + np.outer(by * active, e2_hat)
         results.append(FieldResult(positions, electric, magnetic, magnetic / MU0,
-                                   calculate_poynting_3d(electric, magnetic), frame))
+                                   calculate_poynting_3d(electric, magnetic), frame, active))
     electric = results[0].electric + results[1].electric
     magnetic = results[0].magnetic + results[1].magnetic
     return CounterpropagatingResult(

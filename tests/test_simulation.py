@@ -73,6 +73,38 @@ class SimulationTests(unittest.TestCase):
         self.assertGreater(np.mean(result.wave1.poynting @ direction), 0.0)
         self.assertLess(np.mean(result.wave2.poynting @ direction), 0.0)
 
+    def test_steady_state_waves_fill_the_gap(self):
+        result = simulate_counterpropagating(
+            WaveParameters(), WaveParameters(source_position=(0, 0, 2)), 0.3)
+        self.assertTrue(result.wave1.active.all())
+        self.assertTrue(result.wave2.active.all())
+
+    def test_switched_on_waves_leave_their_own_sources(self):
+        # Sources 2 lambda apart, 1 Hz: each front has travelled 0.5 lambda at t = 0.5 s.
+        result = simulate_counterpropagating(
+            WaveParameters(), WaveParameters(source_position=(0, 0, 2)),
+            0.5, frequency=1.0, switch_on_time=0.0)
+        along = result.positions[:, 2] / C
+        np.testing.assert_array_equal(result.wave1.active, along <= 0.5 + 1e-9)
+        np.testing.assert_array_equal(result.wave2.active, along >= 1.5 - 1e-9)
+        self.assertFalse((result.wave1.active & result.wave2.active).any())
+        for wave in (result.wave1, result.wave2):
+            np.testing.assert_array_equal(wave.electric[~wave.active], 0.0)
+            np.testing.assert_array_equal(wave.poynting[~wave.active], 0.0)
+        # Each wave's energy flows away from its own source.
+        self.assertGreater(np.sum(result.wave1.poynting[:, 2]), 0.0)
+        self.assertLess(np.sum(result.wave2.poynting[:, 2]), 0.0)
+
+    def test_switched_on_fronts_meet_midway_then_overlap_everywhere(self):
+        params = (WaveParameters(), WaveParameters(source_position=(0, 0, 2)))
+        before = simulate_counterpropagating(*params, 0.95, switch_on_time=0.0)
+        after = simulate_counterpropagating(*params, 1.05, switch_on_time=0.0)
+        later = simulate_counterpropagating(*params, 2.0, switch_on_time=0.0)
+        self.assertFalse((before.wave1.active & before.wave2.active).any())
+        overlap = after.positions[after.wave1.active & after.wave2.active, 2] / C
+        self.assertTrue(np.all(np.abs(overlap - 1.0) <= 0.05 + 1e-9))
+        self.assertTrue((later.wave1.active & later.wave2.active).all())
+
     def test_counterpropagating_rejects_coincident_sources(self):
         with self.assertRaises(ValueError):
             simulate_counterpropagating(

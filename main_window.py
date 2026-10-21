@@ -45,6 +45,17 @@ _W2_B = (1.00, 0.55, 0.10, 1.0)   # orange — wave 2 magnetic field
 _W2_S = (0.90, 0.90, 0.10, 1.0)   # yellow — wave 2 Poynting
 _W2_K = (0.60, 1.00, 0.30, 1.0)   # light green — wave 2 propagation
 
+# Combined field in the superposition tab — same hue per quantity as the individual
+# waves, but opaque and thicker; the individual waves are dimmed underneath it.
+_SUM_E = (0.30, 0.60, 1.00, 1.0)  # blue   — E₁ + E₂
+_SUM_B = (1.00, 0.30, 0.30, 1.0)  # red    — B₁ + B₂
+_SUM_S = (1.00, 0.80, 0.00, 1.0)  # gold   — S of the combined field
+_DIM_ALPHA = 0.30                 # individual waves while the combined field is shown
+
+# The carrier is fixed at 1 Hz: one period T is 1 s, and a front advances 1 λ per T.
+_CARRIER_FREQUENCY = 1.0
+_TIME_STEP = 0.05                 # T/20 — one animation tick and one manual step
+
 # Coordinate-axis colors — distinct from all wave colors above to avoid confusion
 _AXIS_X = (0.65, 0.20, 0.85, 1.0)  # violet
 _AXIS_Y = (0.95, 0.25, 0.65, 1.0)  # magenta/pink
@@ -191,6 +202,17 @@ class MainWindow(QMainWindow):
                               self.e_surf2, self.b_surf2, self.s_surf2),
         )
 
+        # Combined (E₁+E₂, B₁+B₂, S) field — superposition tab only
+        self.combined_renderer = WaveRenderObjects.create(self.view, _SUM_E, _SUM_B, _SUM_S)
+        for curve in (self.combined_renderer.electric_curve, self.combined_renderer.magnetic_curve):
+            curve.setData(width=5)
+
+        # Midpoint between the sources, where the two fronts meet
+        self.meeting_marker = gl.GLScatterPlotItem(
+            pos=np.zeros((1, 3)), color=(0.8, 0.8, 0.8, 0.8), size=9, pxMode=True)
+        self.meeting_marker.setVisible(False)
+        self.view.addItem(self.meeting_marker)
+
         # Source position marker for wave 2
         self.source2_marker = gl.GLScatterPlotItem(
             pos=np.array([[0.0, 0.0, 0.0]]),
@@ -307,10 +329,18 @@ class MainWindow(QMainWindow):
                      f"<font color='{b2h}'>■B₂</font>&nbsp;"
                      f"<font color='{s2h}'>■S₂</font>"
                      f"&nbsp;&nbsp;|&nbsp;&nbsp;Осі:&nbsp;{axes}")
+            seh = _c2hex(*_SUM_E); sbh = _c2hex(*_SUM_B); ssh = _c2hex(*_SUM_S)
+            strip += (f"&nbsp;&nbsp;<b>Σ:</b>&nbsp;"
+                      f"<font color='{seh}'>▬E</font>&nbsp;"
+                      f"<font color='{sbh}'>▬B</font>&nbsp;"
+                      f"<font color='{ssh}'>▬S</font>")
             panel = (f"<b>Суперпозиція (Хвиля 1 + Хвиля 2):</b><br>"
                      f"<font color='{e1h}'>■</font>/<font color='{e2h}'>■ E — електричне поле</font><br>"
                      f"<font color='{b1h}'>■</font>/<font color='{b2h}'>■ B — магнітне поле</font><br>"
                      f"<font color='{s1h}'>■</font>/<font color='{s2h}'>■ S — вектор Пойнтінга</font><br>"
+                     f"<font color='{seh}'>▬</font><font color='{sbh}'>▬</font><font color='{ssh}'>▬</font>"
+                     " Σ — сумарне поле в зоні перекриття (окремі хвилі приглушені)<br>"
+                     "<font color='gray'>● посередині — точка зустрічі фронтів</font><br>"
                      "<font color='gray'>─ Осі: X(фіолет.) Y(малин.) Z(корич.)</font>")
         self.legend_strip.setText(strip)
         self.legend_label.setText(panel)
@@ -324,6 +354,42 @@ class MainWindow(QMainWindow):
         else:
             self.pause_button.setText("⏸ Пауза")
             self.timer.start(50)
+
+    def _on_time_preset(self, preset):
+        """Jump to a characteristic moment of the superposition: fronts just left their
+        sources, fronts meet midway, or the waves overlap along the whole gap."""
+        gap = float(np.linalg.norm(self.scenario_params[1].source_position))  # in λ
+        # "later": full overlap, offset T/8 from the instant where in-phase sources
+        # give E Σ = 0 everywhere, so both E Σ and B Σ are visible.
+        periods = {"start": gap / 4, "meet": gap / 2, "later": gap + 0.625}[preset]
+        self._set_time(periods / _CARRIER_FREQUENCY)
+
+    def _on_time_step(self, sign):
+        self._set_time(max(self.t + sign * _TIME_STEP / _CARRIER_FREQUENCY, 0.0))
+
+    @staticmethod
+    def _superposition_time_text(gap, periods):
+        """Readout for the superposition tab; gap in λ, elapsed time in periods T."""
+        front = min(max(periods, 0.0), gap)   # each front advances 1 λ per T
+        meet = gap / 2
+        if periods <= 0:
+            stage = "джерела ще не випромінюють"
+        elif abs(periods - meet) < _TIME_STEP / 2:
+            stage = "фронти зустрічаються"
+        elif periods < meet:
+            stage = f"ще {meet - periods:.2f} T"
+        elif periods < gap:
+            stage = f"перекриття {2 * (periods - meet):.2f}λ"
+        else:
+            stage = "повне перекриття"
+        return (f"t = {periods:.2f} T;  фронти: {front:.2f}λ з {gap:.2f}λ\n"
+                f"зустріч при {meet:.2f} T — {stage}")
+
+    def _set_time(self, t):
+        """Pause the animation and show the given moment."""
+        self.pause_button.setChecked(True)
+        self.t = t
+        self.update_plot()
 
     def _on_visibility_changed(self):
         self.wave_group.setVisible(self.chk_wave.isChecked())
@@ -352,6 +418,7 @@ class MainWindow(QMainWindow):
         self.source_group.setVisible(index >= 1)
         self.source_group.setTitle("Позиція джерела 2" if index == 1 else "Параметри суперпозиції")
         self.source_position_widget.setVisible(index >= 1)
+        self.superposition_time_widget.setVisible(is_superposition)
 
         self._update_legend(index)
         if is_superposition:
@@ -731,13 +798,13 @@ class MainWindow(QMainWindow):
             return
         self._is_updating = True
         try:
-            freq      = 1.0  # Фіксована частота
+            freq      = _CARRIER_FREQUENCY
             repr_mode = self.repr_combo.currentText()
             comp_mode = self.comp_combo.currentText()
             scenario_idx = self.scenario_tabs.currentIndex()
 
             if not self._paused:
-                dt = 0.05 / freq if freq > 0 else 0.05
+                dt = _TIME_STEP / freq
                 self.t += dt
 
             wavelength = C / freq
@@ -749,12 +816,14 @@ class MainWindow(QMainWindow):
             if scenario_idx == 2:
                 # Wave 1 starts at the origin; wave 2 starts at its XYZ point in lambda.
                 # Their directions are derived from the line connecting the two sources.
+                # Both sources switch on at t = 0, so each front leaves its own source.
                 combined = simulate_counterpropagating(
-                    p1, p2, self.t, frequency=freq, steps=self.z_steps)
+                    p1, p2, self.t, frequency=freq, steps=self.z_steps, switch_on_time=0.0)
                 wave1, wave2 = combined.wave1, combined.wave2
                 table_vectors = (combined.electric, combined.magnetic_h, combined.poynting)
                 n_act = float(np.linalg.norm(p2.source_position))
                 z_max = (n_act + 1.0) * wavelength
+                self.time_status.setText(self._superposition_time_text(n_act, self.t * freq))
             else:
                 # Tab 1 is the wave from the origin, whatever source a loaded file names.
                 wave1 = simulate_wave(replace(p1, source_position=(0.0, 0.0, 0.0)),
@@ -907,6 +976,9 @@ class MainWindow(QMainWindow):
                 e_pts  = _arrow_pts(origin, e1_hat * L)
                 b_pts  = _arrow_pts(origin, e2_hat * L)
                 return k_pts, e_pts, b_pts, origin + k_hat*L*1.2, origin + e1_hat*L*1.2, origin + e2_hat*L*1.2
+
+            self.meeting_marker.setData(pos=(off2_v / 2).reshape(1, 3))
+            self.meeting_marker.setVisible(scenario_idx == 2)
 
             show_source2 = scenario_idx in (1, 2)
             self.source2_marker.setData(pos=off2_v.reshape(1, 3))
@@ -1069,53 +1141,76 @@ class MainWindow(QMainWindow):
                                        + np.outer(r * np.sin(angle), t2))
                 return verts
 
-            def draw_linear_wave(e_v, b_v, sv, pos, frame,
-                                  e_line, b_line, s_line, e_curve, b_curve, visible, show_s_flag):
-                # e_line/b_line (per-point field-vector stalks) are retired — curves only
-                e_line.setVisible(False)
-                b_line.setVisible(False)
-                e_curve.setVisible(show_e and visible)
-                b_curve.setVisible(show_b and visible)
-                s_line.setVisible(show_s_flag and visible)
-                if not visible:
-                    return
-                e_curve.setData(pos=pos + e_v)
-                b_curve.setData(pos=pos + b_v)
-                s_line.setData(pos=draw_s_arrows(sv, pos, frame))
+            linear = repr_mode == "Linear (3D)"
 
-            if repr_mode == "Linear (3D)":
-                for surf in (self.e_surf, self.b_surf, self.s_surf,
-                             self.e_surf2, self.b_surf2, self.s_surf2):
-                    surf.setVisible(False)
-                draw_linear_wave(e1_v, b1_v, sv1, pos1_v, wave1.frame,
-                                 self.e_line, self.b_line, self.s_line, self.e_curve, self.b_curve, draw_wave1, show_s_w1)
-                draw_linear_wave(e2_v, b2_v, sv2, pos2_v, wave2.frame,
-                                 self.e_line2, self.b_line2, self.s_line2, self.e_curve2, self.b_curve2, draw_wave2, show_s_w2)
+            def draw_layer(objs, colors, e_v, b_v, sv, pos, frame, visible, show_s_flag,
+                           field_mask, s_mask, alpha):
+                """Draw one wave (or the combined field) over the samples in its masks.
 
-            else:  # Surface (3D)
-                for it in (self.e_line, self.b_line, self.s_line, self.e_curve, self.b_curve,
-                            self.e_line2, self.b_line2, self.s_line2, self.e_curve2, self.b_curve2):
-                    it.setVisible(False)
-                self.e_surf.setVisible(show_e and draw_wave1)
-                self.b_surf.setVisible(show_b and draw_wave1)
-                self.s_surf.setVisible(show_s and draw_wave1 and scenario_idx != 0)
-                self.e_surf2.setVisible(show_e and draw_wave2)
-                self.b_surf2.setVisible(show_b and draw_wave2)
-                self.s_surf2.setVisible(show_s_w2 and draw_wave2)
-                if show_e and draw_wave1:
-                    self.e_surf.setMeshData(vertexes=stalks(pos1_v, e1_v), faces=self.surface_faces)
-                if show_b and draw_wave1:
-                    self.b_surf.setMeshData(vertexes=stalks(pos1_v, b1_v), faces=self.surface_faces)
-                if show_s and draw_wave1:
-                    self.s_surf.setMeshData(vertexes=s_tube(sv1, pos1_v, wave1.frame),
-                                            faces=self.volume_faces)
-                if show_e and draw_wave2:
-                    self.e_surf2.setMeshData(vertexes=stalks(pos2_v, e2_v), faces=self.surface_faces)
-                if show_b and draw_wave2:
-                    self.b_surf2.setMeshData(vertexes=stalks(pos2_v, b2_v), faces=self.surface_faces)
-                if show_s and draw_wave2:
-                    self.s_surf2.setMeshData(vertexes=s_tube(sv2, pos2_v, wave2.frame),
-                                             faces=self.volume_faces)
+                field_mask selects where E/B are drawn and s_mask where S is drawn; both
+                are contiguous runs, so the precomputed strip faces can be sliced to fit.
+                """
+                objs.electric_vectors.setVisible(False)   # per-point stalks are retired
+                objs.magnetic_vectors.setVisible(False)
+                n_field, n_s = int(field_mask.sum()), int(s_mask.sum())
+                fields_on = visible and n_field >= 2
+                flux_on = visible and show_s_flag and n_s >= 2
+                objs.electric_curve.setVisible(linear and show_e and fields_on)
+                objs.magnetic_curve.setVisible(linear and show_b and fields_on)
+                objs.poynting_vectors.setVisible(linear and flux_on)
+                objs.electric_surface.setVisible(not linear and show_e and fields_on)
+                objs.magnetic_surface.setVisible(not linear and show_b and fields_on)
+                objs.poynting_surface.setVisible(not linear and flux_on)
+                e_color, b_color, s_color = (c[:3] + (c[3] * alpha,) for c in colors)
+                if fields_on:
+                    p_f, e_f, b_f = pos[field_mask], e_v[field_mask], b_v[field_mask]
+                    if linear:
+                        objs.electric_curve.setData(pos=p_f + e_f, color=e_color)
+                        objs.magnetic_curve.setData(pos=p_f + b_f, color=b_color)
+                    else:
+                        faces = self.surface_faces[:2 * (n_field - 1)]
+                        objs.electric_surface.setMeshData(vertexes=stalks(p_f, e_f), faces=faces)
+                        objs.magnetic_surface.setMeshData(vertexes=stalks(p_f, b_f), faces=faces)
+                        objs.electric_surface.setColor(e_color[:3] + (0.5 * alpha,))
+                        objs.magnetic_surface.setColor(b_color[:3] + (0.5 * alpha,))
+                if flux_on:
+                    p_s, s_s = pos[s_mask], sv[s_mask]
+                    if linear:
+                        objs.poynting_vectors.setData(pos=draw_s_arrows(s_s, p_s, frame),
+                                                      color=s_color)
+                    else:
+                        objs.poynting_surface.setMeshData(
+                            vertexes=s_tube(s_s, p_s, frame),
+                            faces=self.volume_faces[:8 * (n_s - 1)])
+                        objs.poynting_surface.setColor(s_color[:3] + (0.5 * alpha,))
+
+            # In the superposition tab the combined field is drawn where both fronts have
+            # arrived; each wave keeps its own S arrows only where it is still alone.
+            show_sum = scenario_idx == 2
+            if show_sum:
+                overlap = wave1.active & wave2.active
+                alone1, alone2 = wave1.active & ~overlap, wave2.active & ~overlap
+                dim = _DIM_ALPHA
+            else:
+                overlap = np.zeros(self.z_steps, dtype=bool)
+                alone1, alone2 = wave1.active, wave2.active
+                dim = 1.0
+
+            renderer1, renderer2 = self.wave_renderers
+            draw_layer(renderer1, (_W1_E, _W1_B, _W1_S), e1_v, b1_v, sv1, pos1_v, wave1.frame,
+                       draw_wave1, show_s_w1, wave1.active, alone1, dim)
+            draw_layer(renderer2, (_W2_E, _W2_B, _W2_S), e2_v, b2_v, sv2, pos2_v, wave2.frame,
+                       draw_wave2, show_s_w2, wave2.active, alone2, dim)
+            if show_sum:
+                # Combined S lies along the source-to-source line, k₁ = −k₂.
+                sum_e_v = combined.electric * vis_scale
+                sum_b_v = combined.magnetic * C * vis_scale
+                sum_sv = (combined.poynting @ k1) * scale_s
+                draw_layer(self.combined_renderer, (_SUM_E, _SUM_B, _SUM_S), sum_e_v, sum_b_v,
+                           sum_sv, pos1_v, wave1.frame, True, show_s, overlap, overlap, 1.0)
+            else:
+                for item in self.combined_renderer.items():
+                    item.setVisible(False)
 
         except ValueError as exc:
             self.params_status.setText(f"Помилка обчислення: {exc}")
