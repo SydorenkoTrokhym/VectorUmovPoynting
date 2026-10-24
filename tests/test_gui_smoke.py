@@ -11,9 +11,10 @@ from PyQt6.QtGui import QWheelEvent
 from PyQt6.QtWidgets import QApplication
 
 from controls import set_choice
+from geometry import wave_frame
 from main_window import MainWindow
-from models import Background, ComponentMode, Representation
-from physics import C
+from models import Background, ComponentMode, DirectionMode, Representation
+from physics import C, calculate_fields
 from scene import FIELD_VIEW_SCALE
 from simulation import simulate_counterpropagating, simulate_wave
 
@@ -287,11 +288,73 @@ class MainWindowSmokeTests(unittest.TestCase):
         headers = [table.horizontalHeaderItem(j).text() for j in range(table.columnCount())]
         self.assertIn("By(нТл)", headers)
         self.assertFalse(any(h.startswith("H") for h in headers))
-        wave = simulate_wave(window.scenario_params[0], window.t, steps=window.z_steps)
-        row = 3
-        index = row * (window.z_steps // 20)   # rows every λ/10 of a 2 λ segment
-        self.assertEqual(float(table.item(row, headers.index("By(нТл)")).text()),
-                         round(wave.magnetic[index, 1] * 1e9, 2))
+        self.assert_table_matches_exact_fields(window.scenario_params[0])
+
+    def assert_table_matches_exact_fields(self, params):
+        """Row i must hold the field exactly i·λ/10 from the source, not at a nearby sample."""
+        table, t = self.window.data_table, self.window.t
+        headers = [table.horizontalHeaderItem(j).text() for j in range(table.columnCount())]
+        column = headers.index("By(нТл)")
+        _, _, bx, by = calculate_fields(np.arange(11) / 10 * WAVELENGTH, t)
+        _, e1, e2 = wave_frame(params)
+        exact_y = (np.outer(bx, e1) + np.outer(by, e2))[:, 1] * 1e9
+        for row in range(11):
+            self.assertEqual(table.item(row, 0).text(), "0" if row == 0 else f"{row / 10:.2g}λ")
+            self.assertEqual(float(table.item(row, column).text()),
+                             float(f"{exact_y[row]:.2f}") + 0.0, f"row {row}")
+
+    def test_data_table_rows_sit_on_tenths_of_lambda_for_any_length(self):
+        window = self.window
+        window.chk_data.setChecked(True)
+        for periods in (3, 7):
+            with self.subTest(periods=periods):
+                window.n_periods_spin.setValue(periods)
+                window._set_time(0.37)
+                self.assert_table_matches_exact_fields(window.scenario_params[0])
+        self.assert_no_errors()
+
+    def test_calculation_error_clears_once_parameters_are_valid(self):
+        window = self.window
+        set_choice(window.dir_mode_combo, DirectionMode.VECTOR)
+        for spin in (window.dir_x_spin, window.dir_y_spin, window.dir_z_spin):
+            spin.setValue(0.0)
+        self.assertTrue(window.params_status.text().startswith("Помилка обчислення"))
+        window.dir_x_spin.setValue(1.0)
+        self.assertEqual(window.params_status.text(), "—")
+        self.assert_no_errors()
+
+    def test_axis_labels_name_the_axes_the_fields_lie_along(self):
+        window = self.window
+        axis_texts = lambda: [label.text for label in window.axes.labels]
+        window.update_plot()
+        self.assertEqual(axis_texts(), ["X (E)", "Y (B)", "Z"])
+        window.wave_prop_dir_combo.setCurrentText("+X")   # frame k = X, E = Y, B = Z
+        self.assertEqual(axis_texts(), ["X", "Y (E)", "Z (B)"])
+        window.wave_prop_dir_combo.setCurrentText("+Z")
+        window.e_dir_combo.setCurrentText("+Y")           # E = Y, B = −X
+        self.assertEqual(axis_texts(), ["X (B)", "Y (E)", "Z"])
+        window.scenario_tabs.setCurrentIndex(2)
+        self.assertEqual(axis_texts(), ["X", "Y", "Z"])
+        self.assert_no_errors()
+
+    def test_axes_cover_a_wave_running_toward_minus(self):
+        window = self.window
+        window.n_periods_spin.setValue(3)
+        for direction, axis in (("-Z", 2), ("-X", 0)):
+            with self.subTest(direction=direction):
+                window.wave_prop_dir_combo.setCurrentText(direction)
+                pos = np.asarray(window.axes.arrows.pos)
+                start = pos[6 * axis]   # each axis line starts its block of points
+                self.assertAlmostEqual(start[axis], -(3 + 2))   # wave plus 2 λ margin
+                texts = [label.text for label in window.axes.tick_labels if label.visible()]
+                self.assertIn("−3λ", texts)
+        self.assert_no_errors()
+
+    def test_wave1_camera_looks_along_the_wave(self):
+        window = self.window
+        window.wave_prop_dir_combo.setCurrentText("-Z")
+        window._apply_wave1_camera()
+        np.testing.assert_allclose(list(window.view.opts['center']), [0.0, 0.0, -1.0])
 
     def test_overlap_toggle_leaves_only_the_sum_in_the_overlap(self):
         window = self.window

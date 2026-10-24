@@ -71,6 +71,38 @@ class PersistenceTests(unittest.TestCase):
         with self.assertRaises(ConfigurationError):
             configuration_from_dict(data)
 
+    def test_wrongly_typed_values_are_rejected_not_crashing(self):
+        cases = [("waves", "amplitude", "1"), ("waves", "phase_degrees", None),
+                 ("waves", "periods", 2.5), ("waves", "periods", True),
+                 ("waves", "modulation_index", [0.5]), ("waves", "source_position", 5),
+                 ("waves", "source_position", [0, "1", 0]), ("waves", "direction_vector", None),
+                 ("waves", "propagation_direction", ["+Z"]), ("waves", "electric_direction", 1),
+                 ("waves", "polarization", ["linear"]),
+                 ("visualization", "pixels_per_wavelength", "100"),
+                 ("visualization", "pixels_per_wavelength", 99.5)]
+        for section, key, value in cases:
+            with self.subTest(key=key, value=value):
+                data = configuration_to_dict(ScenarioConfiguration())
+                target = data["waves"][0] if section == "waves" else data["visualization"]
+                target[key] = value
+                with self.assertRaises(ConfigurationError):
+                    configuration_from_dict(data)
+
+    def test_whole_number_floats_are_read_as_integers(self):
+        data = configuration_to_dict(ScenarioConfiguration())
+        data["waves"][0]["periods"] = 3.0
+        data["visualization"]["pixels_per_wavelength"] = 150.0
+        restored = configuration_from_dict(data)
+        self.assertEqual((restored.waves[0].periods, restored.visualization.pixels_per_wavelength),
+                         (3, 150))
+        self.assertIsInstance(restored.waves[0].periods, int)
+
+    def test_malformed_v1_sections_are_rejected(self):
+        for waves in ([], {"0": "linear"}):
+            with self.subTest(waves=waves):
+                with self.assertRaises(ConfigurationError):
+                    configuration_from_dict({"schema_version": 1, "waves": waves})
+
     def test_unknown_schema_is_rejected(self):
         with self.assertRaises(ConfigurationError):
             configuration_from_dict({"schema_version": 99})

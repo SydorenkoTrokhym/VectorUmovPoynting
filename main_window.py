@@ -19,7 +19,7 @@ from models import (Background, ComponentMode, DirectionMode, Modulation, Polari
 from persistence import ConfigurationError, configuration_from_dict, configuration_to_dict
 from physics import C
 from scene import (FIELD_VIEW_SCALE, AxesLayer, DrawStyle, FieldLayer, IndicatorLayer,
-                   MeetingFieldArrows, SceneFrame)
+                   MeetingFieldArrows, SceneFrame, axis_extents, field_axis_notes)
 from simulation import simulate_counterpropagating, simulate_wave
 from superposition import (CARRIER_FREQUENCY, TIME_STEP, place_source2, preset_periods,
                            time_text)
@@ -40,6 +40,7 @@ class MainWindow(QMainWindow):
         self._paused = True
         self._is_updating = False
         self._camera_ready = False   # the first frame sets the camera from px/λ
+        self._calculation_failed = False   # the status line shows a calculation error
         self.z_steps = Z_STEPS
 
         # Scenario tabs — each stores independent wave/modulation + source parameters
@@ -317,11 +318,16 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _apply_wave1_camera(self):
-        """Fixed camera for Tab 1: X up, Z left-to-right, Y toward the viewer. The
-        origin sits a quarter of the Z-axis length left of screen-middle, leaving more
-        room for the wave."""
-        z_axis_len = self.scenario_params[0].periods + 2
-        camera.set_fixed_camera(self.view, camera.WAVE1_ROTATION, (0, 0, z_axis_len * 0.25))
+        """Fixed camera for Tab 1: X up, Z left-to-right, Y toward the viewer. It looks
+        a quarter of the axis length (wave plus margin) along k from the origin, which
+        leaves more room for the wave than for the space behind its source."""
+        p1 = self.scenario_params[0]
+        try:
+            k_hat = wave_frame(p1)[0]
+        except ValueError:
+            k_hat = np.array([0.0, 0.0, 1.0])   # the redraw reports the invalid direction
+        camera.set_fixed_camera(self.view, camera.WAVE1_ROTATION,
+                                k_hat * (p1.periods + 2) * 0.25)
 
     def _apply_wave2_camera(self):
         """Fixed camera for Tab 2: X down, Y away from the viewer, Z left-to-right.
@@ -508,7 +514,13 @@ class MainWindow(QMainWindow):
             style = self._draw_style()
             self.fields.draw(frame, style)
             self.meeting_arrows.draw(frame, style)
+            if self._calculation_failed:
+                # The parameters are valid again: drop the stale error message.
+                self._calculation_failed = False
+                self.params_status.setText("—")
+                self.params_status.setStyleSheet("font-size: 8pt; color: gray;")
         except ValueError as exc:
+            self._calculation_failed = True
             self._show_status(f"Помилка обчислення: {exc}", ok=False)
         finally:
             self._is_updating = False
@@ -544,17 +556,17 @@ class MainWindow(QMainWindow):
                           self.t * frequency, C / frequency)
 
     def _draw_axes(self, frame):
-        # X/Y are sized to the field actually drawn (2× its peak excursion); Z to the
-        # shown length plus a 2λ margin. Every axis points to its + direction, so the
-        # axes stay right-handed under every camera.
+        # Each axis reaches at least 2× the peak field excursion, and covers the shown
+        # wave on whichever side of the origin it runs (plus a 2 λ margin). Every arrow
+        # points to its + direction, so the axes stay right-handed under every camera.
         p1, p2 = self.scenario_params
-        s_xy = 2 * max(p1.amplitude, p2.amplitude, 1e-12) * FIELD_VIEW_SCALE
-        s_z = frame.extent + 2
-        if frame.tab == WAVE2_TAB:
-            # Reach the far end of wave 2 even when its source sits further along +Z
-            s_z = max(s_z, abs(frame.source2[2]) + 2)
-        self.axes.draw(s_xy, s_xy, s_z, field_labels=frame.tab != SUPERPOSITION_TAB,
-                       px_per_unit=self._pixels_per_unit(), grid_extent=frame.z_max)
+        minimum = 2 * max(p1.amplitude, p2.amplitude, 1e-12) * FIELD_VIEW_SCALE
+        # The superposition's wave 1 already spans the whole gap between the sources.
+        wave = frame.wave2 if frame.tab == WAVE2_TAB else frame.wave1
+        plus, minus = axis_extents(frame.view_positions(wave), minimum)
+        notes = field_axis_notes(wave.frame) if frame.tab != SUPERPOSITION_TAB else ("",) * 3
+        self.axes.draw(plus, minus, notes, px_per_unit=self._pixels_per_unit(),
+                       grid_extent=frame.z_max)
 
     def _draw_style(self) -> DrawStyle:
         component = choice(self.comp_combo, ComponentMode)
@@ -567,17 +579,22 @@ class MainWindow(QMainWindow):
         )
 
     def _fill_data_table(self, frame):
+        # The rows are evaluated on their own grid, exactly at each labelled point: the
+        # drawn curve's samples fall on tenths of λ only for some segment lengths.
+        p1, p2 = self.scenario_params
         if frame.tab == SUPERPOSITION_TAB:
-            result = frame.combined
-            indices = np.linspace(0, self.z_steps - 1, TABLE_ROWS, dtype=int)
+            # Tenths of the gap between the sources
+            result = simulate_counterpropagating(
+                p1, place_source2(p2, self.configuration.source_separation), self.t,
+                frequency=CARRIER_FREQUENCY, steps=TABLE_ROWS, switch_on_time=0.0)
             coordinates = [frame.extent * i / 10 for i in range(TABLE_ROWS)]
         else:
-            result = frame.wave1 if frame.tab == WAVE1_TAB else frame.wave2
-            # Rows every λ/10 from the source
-            step = max(int(self.z_steps // (frame.extent * 10)), 1)
-            indices = [min(i * step, self.z_steps - 1) for i in range(TABLE_ROWS)]
+            # Rows every λ/10 over the first λ from the source
+            params = p1 if frame.tab == WAVE1_TAB else p2
+            result = simulate_wave(replace(params, periods=1), self.t,
+                                   frequency=CARRIER_FREQUENCY, steps=TABLE_ROWS)
             coordinates = [i / 10 for i in range(TABLE_ROWS)]
-        rows = np.hstack([result.electric[indices], result.magnetic[indices] * 1e9,
-                          result.poynting[indices]])   # B in nT
+        rows = np.hstack([result.electric, result.magnetic * 1e9,
+                          result.poynting])   # B in nT
         labels = ["0" if i == 0 else f"{c:.2g}λ" for i, c in enumerate(coordinates)]
         fill_table(self.data_table, rows, labels)

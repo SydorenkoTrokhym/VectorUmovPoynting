@@ -44,9 +44,13 @@ def configuration_to_dict(configuration: ScenarioConfiguration) -> dict[str, Any
 
 def _migrate_v1(data: dict[str, Any]) -> dict[str, Any]:
     old_waves = data.get("waves", {})
+    if not isinstance(old_waves, dict):
+        raise ConfigurationError("waves must be an object in schema version 1")
     waves = []
     for index in ("0", "1"):
         old = old_waves.get(index, {})
+        if not isinstance(old, dict):
+            raise ConfigurationError(f"wave {index} must be an object")
         waves.append({
             "polarization": old.get("pol", "linear"),
             "amplitude": old.get("amplitude", 1.0),
@@ -63,6 +67,8 @@ def _migrate_v1(data: dict[str, Any]) -> dict[str, Any]:
             "source_position": [old.get("x0", 0), old.get("y0", 0), old.get("z0", 0)],
         })
     old_viz = data.get("visualization", {})
+    if not isinstance(old_viz, dict):
+        raise ConfigurationError("visualization must be an object")
     return {"schema_version": 2, "waves": waves, "visualization": {
         "component_mode": old_viz.get("comp_mode", "Узагальнений підхід"),
         "representation_mode": old_viz.get("repr_mode", "Linear (3D)"),
@@ -95,8 +101,28 @@ def _migrate_v2(data: dict[str, Any]) -> dict[str, Any]:
 def _enum(enum_type: type[StrEnum], value: Any, what: str) -> StrEnum:
     try:
         return enum_type(value)
-    except ValueError:
+    except (TypeError, ValueError):
         raise ConfigurationError(f"Invalid {what}: {value!r}") from None
+
+
+def _number(value: Any, what: str) -> float:
+    # bool is an int subclass, but true/false in a file is never a valid number
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or not np.isfinite(value):
+        raise ConfigurationError(f"{what} must be a number, not {value!r}")
+    return float(value)
+
+
+def _integer(value: Any, what: str) -> int:
+    number = _number(value, what)
+    if not number.is_integer():
+        raise ConfigurationError(f"{what} must be a whole number, not {value!r}")
+    return int(number)
+
+
+def _vector(value: Any, what: str) -> tuple[float, float, float]:
+    if not isinstance(value, (list, tuple)) or len(value) != 3:
+        raise ConfigurationError(f"{what} must have three components")
+    return tuple(_number(component, what) for component in value)
 
 
 def configuration_from_dict(raw: Any) -> ScenarioConfiguration:
@@ -136,6 +162,8 @@ def _parse_visualization(data: Any) -> VisualizationSettings:
         Representation, visualization.representation_mode, "representation")
     visualization.background = _enum(Background, visualization.background, "background")
     visualization.projection = _enum(Projection, visualization.projection, "projection")
+    visualization.pixels_per_wavelength = _integer(
+        visualization.pixels_per_wavelength, "pixels_per_wavelength")
     if not 10 <= visualization.pixels_per_wavelength <= 2000:
         raise ConfigurationError("pixels_per_wavelength must be in [10, 2000]")
     return visualization
@@ -144,10 +172,20 @@ def _parse_visualization(data: Any) -> VisualizationSettings:
 def _parse_wave(data: Any, index: int) -> WaveParameters:
     if not isinstance(data, dict):
         raise ConfigurationError(f"wave {index} must be an object")
+    values = dict(data)
+    values["direction_vector"] = _vector(
+        values.get("direction_vector", (0, 0, 1)), f"Wave {index} direction vector")
+    values["source_position"] = _vector(
+        values.get("source_position", (0, 0, 0)), f"Wave {index} source position")
+    for key in ("amplitude", "phase_degrees", "modulation_frequency", "modulation_index"):
+        if key in values:
+            values[key] = _number(values[key], f"Wave {index} {key}")
+    if "periods" in values:
+        values["periods"] = _integer(values["periods"], f"Wave {index} periods")
+    for key in ("propagation_direction", "electric_direction", "magnetic_direction"):
+        if key in values and not isinstance(values[key], str):
+            raise ConfigurationError(f"Wave {index} {key} must be text, not {values[key]!r}")
     try:
-        values = dict(data)
-        values["direction_vector"] = tuple(values.get("direction_vector", (0, 0, 1)))
-        values["source_position"] = tuple(values.get("source_position", (0, 0, 0)))
         values.setdefault("electric_direction", "+X")
         values.setdefault(
             "magnetic_direction",
@@ -170,8 +208,6 @@ def _parse_wave(data: Any, index: int) -> WaveParameters:
         expected_z = 1.0 if wave.propagation_direction == "+Z" else -1.0
         if not np.isclose(flow_direction[2], expected_z):
             raise ConfigurationError(f"Wave {index}: E × B contradicts propagation direction")
-    if len(wave.direction_vector) != 3 or len(wave.source_position) != 3:
-        raise ConfigurationError(f"Wave {index} vectors must have three components")
     if not 0.1 <= wave.amplitude <= 100 or not 0 <= wave.phase_degrees <= 360:
         raise ConfigurationError(f"Wave {index} amplitude or phase is out of range")
     if not 1 <= wave.periods <= 10 or not 0 <= wave.modulation_index <= 1:

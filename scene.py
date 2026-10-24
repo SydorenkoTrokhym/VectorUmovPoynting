@@ -37,6 +37,7 @@ MEET_FIELD_SHIFT = 0.15     # λ; offset of each wave's E/B arrows at the meetin
 MEET_FIELD_MIN = 1e-3       # λ; shorter field arrows (e.g. at a node) are not drawn
 
 TICK_STEP = 0.25            # λ/4
+AXIS_MARGIN = 2.0           # λ past the far end of a wave along the axes it runs along
 MIN_LABEL_PX = 45           # thin tick labels so they stay at least this far apart
 _LABEL_STEP_CANDIDATES = (1, 2, 4, 8, 16, 32, 64, 128)   # multiples of TICK_STEP
 _TICKS_PER_AXIS = 29
@@ -125,15 +126,15 @@ class AxesLayer:
                        gl.GLTextItem(pos=(0, 0, 12), text='Z', color=txt_rgba(NEUTRAL))]
         for item in (self.arrows, self.ticks, *self.labels):
             view.addItem(item)
-        # Label pool — 30 per axis × 3 axes
+        # Label pool — up to _TICKS_PER_AXIS on each side of each of the 3 axes
         self.tick_labels = []
-        for _ in range(90):
+        for _ in range(6 * _TICKS_PER_AXIS):
             label = gl.GLTextItem(pos=(0, 0, 0), text='', color=txt_rgba((0.7, 0.7, 0.7, 0.9)))
             label.setVisible(False)
             view.addItem(label)
             self.tick_labels.append(label)
         self._text_color = txt_rgba(BACKGROUNDS[Background.BLACK]["text"])
-        self.draw(12, 12, 12, field_labels=False, px_per_unit=100, grid_extent=None)
+        self.draw((12, 12, 12), (0, 0, 0), ("", "", ""), px_per_unit=100, grid_extent=None)
 
     def set_background(self, background: Background):
         cfg = BACKGROUNDS[background]
@@ -144,30 +145,31 @@ class AxesLayer:
         for label in self.tick_labels:
             label.setData(color=self._text_color)
 
-    def draw(self, s_x, s_y, s_z, field_labels, px_per_unit, grid_extent):
-        """Axis lengths in λ."""
-        self.labels[0].setData(pos=(s_x, 0, 0), color=txt_rgba(NEUTRAL),
-                               text='X (E)' if field_labels else 'X')
-        self.labels[1].setData(pos=(0, s_y, 0), color=txt_rgba(NEUTRAL),
-                               text='Y (B)' if field_labels else 'Y')
-        self.labels[2].setData(pos=(0, 0, s_z), color=txt_rgba(NEUTRAL))
-        hs_x, hw_x = s_x * 0.05, s_x * 0.02
-        hs_y, hw_y = s_y * 0.05, s_y * 0.02
-        hs_z, hw_z = s_z * 0.05, s_z * 0.02
-        points = np.array([
-            [0,0,0],[s_x,0,0], [s_x,0,0],[s_x-hs_x,hw_x,0], [s_x,0,0],[s_x-hs_x,-hw_x,0],
-            [0,0,0],[0,s_y,0], [0,s_y,0],[hw_y,s_y-hs_y,0], [0,s_y,0],[-hw_y,s_y-hs_y,0],
-            [0,0,0],[0,0,s_z], [0,0,s_z],[hw_z,0,s_z-hs_z], [0,0,s_z],[-hw_z,0,s_z-hs_z],
-            [0,0,s_z],[0,hw_z,s_z-hs_z], [0,0,s_z],[0,-hw_z,s_z-hs_z],
-        ], dtype=float)
+    def draw(self, plus, minus, notes, px_per_unit, grid_extent):
+        """Axis lengths in λ toward + (plus) and toward − (minus), per X/Y/Z; notes
+        name the field each axis carries ("E", "B" or "")."""
+        points = []
+        for axis, (name, length, back, note) in enumerate(zip("XYZ", plus, minus, notes)):
+            unit = np.eye(3)[axis]
+            tip = unit * length
+            self.labels[axis].setData(pos=tuple(tip), color=txt_rgba(NEUTRAL),
+                                      text=f"{name} ({note})" if note else name)
+            head, half_width = length * 0.05, length * 0.02
+            # The X and Y heads open in the XY plane; Z gets a head in both planes.
+            sides = [np.eye(3)[1 - axis]] if axis < 2 else [np.eye(3)[0], np.eye(3)[1]]
+            points += [-unit * back, tip]
+            for side in sides:
+                points += [tip, tip - unit * head + side * half_width,
+                           tip, tip - unit * head - side * half_width]
+        points = np.array(points, dtype=float)
         self.arrows.setData(pos=points, color=np.array([NEUTRAL] * len(points)))
-        self._draw_ticks(s_x, s_y, s_z, px_per_unit)
+        self._draw_ticks(plus, minus, px_per_unit)
         if grid_extent is not None and grid_extent != self._grid_extent:
             self.grid.resetTransform()
             self.grid.scale(grid_extent / 10, grid_extent / 10, 1)
             self._grid_extent = grid_extent
 
-    def _draw_ticks(self, s_x, s_y, s_z, px_per_unit):
+    def _draw_ticks(self, plus, minus, px_per_unit):
         # Ticks are drawn every λ/4, but labels only every λ/4-multiple that keeps
         # them MIN_LABEL_PX apart on screen, so they don't overlap when zoomed out.
         px_per_unit = max(px_per_unit, 1e-9)
@@ -175,32 +177,50 @@ class AxesLayer:
             (m for m in _LABEL_STEP_CANDIDATES if m * TICK_STEP * px_per_unit >= MIN_LABEL_PX),
             _LABEL_STEP_CANDIDATES[-1])
         points, labels = [], []
-        for axis, length in (('Z', s_z), ('X', s_x), ('Y', s_y)):
-            # A negative length walks the ticks outward toward −axis.
-            sign, magnitude = (-1.0 if length < 0 else 1.0), abs(length)
-            size = magnitude * 0.018
-            for i in range(1, min(int(magnitude / TICK_STEP), _TICKS_PER_AXIS) + 1):
-                p = i * TICK_STEP * sign
-                if abs(p) > magnitude * 1.01:
-                    break
-                if axis == 'Z':
-                    points += [[-size, 0, p], [size, 0, p], [0, -size, p], [0, size, p]]
-                    label_pos = (-size * 3.5, 0.0, p)
-                elif axis == 'X':
-                    points += [[p, -size, 0], [p, size, 0], [p, 0, -size], [p, 0, size]]
-                    label_pos = (p, -size * 3.5, 0.0)
-                else:
-                    points += [[-size, p, 0], [size, p, 0], [0, p, -size], [0, p, size]]
-                    label_pos = (-size * 3.5, p, 0.0)
-                if i % label_step == 0:
-                    text = _TICK_LABELS[i] if i < len(_TICK_LABELS) else f"{i}λ/4"
-                    labels.append((label_pos, text))
+        for axis in (2, 0, 1):
+            unit = np.eye(3)[axis]
+            across = [np.eye(3)[other] for other in range(3) if other != axis]
+            # Labels sit beside Z and Y toward −X, and beside X toward −Y.
+            label_side = np.eye(3)[1 if axis == 0 else 0]
+            size = max(plus[axis], minus[axis]) * 0.018
+            for sign, magnitude in ((1.0, plus[axis]), (-1.0, minus[axis])):
+                for i in range(1, min(int(magnitude / TICK_STEP), _TICKS_PER_AXIS) + 1):
+                    p = unit * (i * TICK_STEP * sign)
+                    for side in across:
+                        points += [p - side * size, p + side * size]
+                    if i % label_step == 0:
+                        text = _TICK_LABELS[i] if i < len(_TICK_LABELS) else f"{i}λ/4"
+                        labels.append((tuple(p - label_side * size * 3.5),
+                                       text if sign > 0 else "−" + text))
         for label, (pos, text) in zip(self.tick_labels, labels):
             label.setData(pos=pos, text=text, color=self._text_color)
             label.setVisible(True)
         for label in self.tick_labels[len(labels):]:
             label.setVisible(False)
         self.ticks.setData(pos=np.array(points, dtype=float) if points else np.zeros((2, 3)))
+
+
+def axis_extents(points, minimum):
+    """(plus, minus): how far each axis must reach toward + and − to cover the
+    points (λ units). An axis the points run along beyond `minimum` gets AXIS_MARGIN
+    past their far end; every axis reaches at least `minimum` toward +."""
+    points = np.asarray(points, dtype=float)
+    high = np.maximum(points.max(axis=0), 0.0)
+    low = np.maximum(-points.min(axis=0), 0.0)
+    plus = np.where(high > minimum, high + AXIS_MARGIN, minimum)
+    minus = np.where(low > minimum, low + AXIS_MARGIN, 0.0)
+    return plus, minus
+
+
+def field_axis_notes(frame):
+    """"E"/"B" for the axes the wave's initial E and B lie along, given its (k, E, B)
+    frame; an axis no field is aligned with (e.g. a tilted vector frame) gets ""."""
+    notes = ["", "", ""]
+    for name, direction in zip("EB", frame[1:]):
+        axis = int(np.argmax(np.abs(direction)))
+        if np.isclose(abs(direction[axis]), 1.0):
+            notes[axis] = name
+    return tuple(notes)
 
 
 class IndicatorLayer:
