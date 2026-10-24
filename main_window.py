@@ -153,13 +153,7 @@ class MainWindow(QMainWindow):
             self.phase_spin.setValue(float(self.phase_preset_combo.currentText()))
 
     def _on_scenario_changed(self, index):
-        if index == WAVE1_TAB:
-            self._apply_wave1_camera()
-        elif index == WAVE2_TAB:
-            self._apply_wave2_camera()
-        else:
-            camera.set_default_camera(self.view, choice(self.proj_combo, Projection))
-            self._center_on_meeting_point()
+        self._apply_camera(index)
 
         is_superposition = index == SUPERPOSITION_TAB
         self.wave_group.setEnabled(not is_superposition)
@@ -245,8 +239,14 @@ class MainWindow(QMainWindow):
             self._rebuild_magnetic_direction_choices()
         k_hat, _, _ = field_directions(self.e_dir_combo.currentText(), self.b_dir_combo.currentText())
         direction = "+Z" if k_hat[2] > 0 else "-Z"
-        set_choice(self.dir_mode_combo, DirectionMode.AXIS)
-        self.wave_prop_dir_combo.setCurrentText(direction)
+        # Adjust the direction widgets without their handlers each redrawing.
+        self._is_updating = True
+        try:
+            set_choice(self.dir_mode_combo, DirectionMode.AXIS)
+            self.wave_prop_dir_combo.setCurrentText(direction)
+        finally:
+            self._is_updating = False
+        self._sync_dir_visibility()
         self.field_direction_status.setText(f"E ⊥ B;  E × B = {direction}")
         self.field_direction_status.setStyleSheet("font-size: 8pt; color: #33aa55;")
         self._on_param_changed()
@@ -261,10 +261,14 @@ class MainWindow(QMainWindow):
         self.b_dir_combo.setEnabled(enabled)
         if enabled:
             desired = 1 if direction == "+Z" else -1
-            for candidate in [self.b_dir_combo.itemText(i) for i in range(self.b_dir_combo.count())]:
-                if np.sign(field_directions(self.e_dir_combo.currentText(), candidate)[0][2]) == desired:
-                    self.b_dir_combo.setCurrentText(candidate)
-                    break
+            self._is_updating = True   # one redraw below, not another from the B combo
+            try:
+                for candidate in [self.b_dir_combo.itemText(i) for i in range(self.b_dir_combo.count())]:
+                    if np.sign(field_directions(self.e_dir_combo.currentText(), candidate)[0][2]) == desired:
+                        self.b_dir_combo.setCurrentText(candidate)
+                        break
+            finally:
+                self._is_updating = False
             self.field_direction_status.setText(f"E ⊥ B;  E × B = {direction}")
         else:
             self.field_direction_status.setText("Вибір ±X/±Y доступний для потоку вздовж ±Z")
@@ -304,7 +308,7 @@ class MainWindow(QMainWindow):
         if self._is_updating:
             return
         self.configuration.source_separation = value
-        self._center_on_meeting_point()
+        camera.look_at(self.view, self._camera_target(SUPERPOSITION_TAB))
         self.update_plot()
 
     def _on_repr_changed(self, _text):
@@ -317,37 +321,40 @@ class MainWindow(QMainWindow):
     # Camera
     # ------------------------------------------------------------------
 
-    def _apply_wave1_camera(self):
-        """Fixed camera for Tab 1: X up, Z left-to-right, Y toward the viewer. It looks
-        a quarter of the axis length (wave plus margin) along k from the origin, which
-        leaves more room for the wave than for the space behind its source."""
-        p1 = self.scenario_params[0]
-        try:
-            k_hat = wave_frame(p1)[0]
-        except ValueError:
-            k_hat = np.array([0.0, 0.0, 1.0])   # the redraw reports the invalid direction
-        camera.set_fixed_camera(self.view, camera.WAVE1_ROTATION,
-                                k_hat * (p1.periods + 2) * 0.25)
+    def _apply_camera(self, tab):
+        """With the "3D" projection, Tabs 1 and 2 use their fixed cameras:
+        Tab 1 — X up, Z left-to-right, Y toward the viewer;
+        Tab 2 — X down, Y away from the viewer, Z left-to-right.
+        The superposition, and every tab under XY/XZ/YZ, uses the projection's
+        elevation/azimuth camera. Either way it looks at the tab's _camera_target."""
+        projection = choice(self.proj_combo, Projection)
+        target = self._camera_target(tab)
+        if projection == Projection.PERSPECTIVE and tab != SUPERPOSITION_TAB:
+            rotation = camera.WAVE1_ROTATION if tab == WAVE1_TAB else camera.WAVE2_ROTATION
+            camera.set_fixed_camera(self.view, rotation, target)
+        else:
+            camera.set_default_camera(self.view, projection)
+            camera.look_at(self.view, target)
 
-    def _apply_wave2_camera(self):
-        """Fixed camera for Tab 2: X down, Y away from the viewer, Z left-to-right.
-        It looks at the middle of wave 2, wherever its source and direction put it."""
-        p2 = self.scenario_params[1]
-        source = np.asarray(p2.source_position, dtype=float)
+    def _camera_target(self, tab):
+        """Tab 1: a quarter of the axis length (wave plus margin) along k from the
+        origin, leaving more room for the wave than for the space behind its source.
+        Tab 2: the middle of wave 2, wherever its source and direction put it.
+        Superposition: the midpoint between the sources."""
+        if tab == SUPERPOSITION_TAB:
+            source2 = place_source2(self.scenario_params[1], self.configuration.source_separation)
+            return np.asarray(source2.source_position) / 2
+        params = self.scenario_params[tab]
         try:
-            k_hat = wave_frame(p2)[0]
+            k_hat = wave_frame(params)[0]
         except ValueError:
             k_hat = np.zeros(3)   # the redraw reports the invalid direction
-        camera.set_fixed_camera(self.view, camera.WAVE2_ROTATION,
-                                source + k_hat * p2.periods / 2)
-
-    def _center_on_meeting_point(self):
-        """Superposition camera looks at the midpoint between the sources."""
-        source2 = place_source2(self.scenario_params[1], self.configuration.source_separation)
-        camera.look_at(self.view, np.asarray(source2.source_position) / 2)
+        if tab == WAVE1_TAB:
+            return k_hat * (params.periods + 2) * 0.25
+        return np.asarray(params.source_position, dtype=float) + k_hat * params.periods / 2
 
     def _on_projection_changed(self, _index):
-        camera.set_projection(self.view, choice(self.proj_combo, Projection))
+        self._apply_camera(self.scenario_tabs.currentIndex())
 
     def _distance_for_pxw(self, px_per_wavelength):
         return camera.distance_for_pxw(self.view, px_per_wavelength)
@@ -382,12 +389,7 @@ class MainWindow(QMainWindow):
 
     def _init_camera(self, tab):
         self.view.opts['distance'] = self._distance_for_pxw(self.pxw_spin.value())
-        if tab == WAVE1_TAB:
-            self._apply_wave1_camera()
-        elif tab == WAVE2_TAB:
-            self._apply_wave2_camera()
-        else:
-            self.view.setCameraPosition(elevation=30, azimuth=45)
+        self._apply_camera(tab)
         self._camera_ready = True
 
     # ------------------------------------------------------------------
@@ -472,7 +474,16 @@ class MainWindow(QMainWindow):
         self._show_status(f"✓ {pathlib.Path(path).name}", ok=True)
 
     def _on_save_image(self):
-        """Save screenshot of the 3D view + data table."""
+        path, selected = QFileDialog.getSaveFileName(
+            self, "Зберегти малюнок", "", "PNG (*.png);;JPEG (*.jpg *.jpeg)")
+        if path:
+            self._save_image(path, ".jpg" if selected.startswith("JPEG") else ".png")
+
+    def _save_image(self, path, default_suffix=".png"):
+        """Save a screenshot of the 3D view + data table. A path without an image
+        extension gets default_suffix, since the extension picks the format."""
+        if pathlib.Path(path).suffix.lower() not in (".png", ".jpg", ".jpeg"):
+            path += default_suffix
         plot_pixmap = self.view.grab()
         table_pixmap = self.data_table.grab()
         combined_width = max(plot_pixmap.width(), table_pixmap.width())
@@ -488,9 +499,12 @@ class MainWindow(QMainWindow):
         painter.drawText(10, plot_pixmap.height() + 15, "Таблиця розрахунків:")
         painter.end()
 
-        path, _ = QFileDialog.getSaveFileName(self, "Зберегти малюнок", "", "Images (*.png *.jpg)")
-        if path:
-            final_pixmap.save(path)
+        name = pathlib.Path(path).name
+        if final_pixmap.save(path):
+            self._show_status(f"✓ {name}", ok=True)
+        else:
+            self._show_status(f"Не вдалося зберегти малюнок {name}", ok=False)
+        return path
 
     # ------------------------------------------------------------------
     # Redraw
@@ -538,13 +552,18 @@ class MainWindow(QMainWindow):
             combined = simulate_counterpropagating(
                 p1, source2_params, self.t, frequency=frequency, steps=self.z_steps,
                 switch_on_time=0.0)
+            # The fields exactly at the meeting point: sample 1 of [source 1, midpoint,
+            # source 2]. The 200-sample grid has no sample there.
+            meeting = simulate_counterpropagating(
+                p1, source2_params, self.t, frequency=frequency, steps=3,
+                switch_on_time=0.0)
             wave1, wave2 = combined.wave1, combined.wave2
             source2 = np.asarray(source2_params.source_position)
             extent = self.configuration.source_separation
             z_max = extent + 1.0
         else:
             # Tab 1 is the wave from the origin, whatever source a loaded file names.
-            combined = None
+            combined = meeting = None
             wave1 = simulate_wave(replace(p1, source_position=(0.0, 0.0, 0.0)),
                                   self.t, frequency=frequency, steps=self.z_steps)
             wave2 = simulate_wave(p2, self.t, frequency=frequency, steps=self.z_steps)
@@ -553,7 +572,7 @@ class MainWindow(QMainWindow):
             # The coordinate system covers both waves' extents
             z_max = max(p1.periods, np.linalg.norm(source2) + p2.periods) * 1.15
         return SceneFrame(tab, wave1, wave2, combined, source2, extent, z_max,
-                          self.t * frequency, C / frequency)
+                          self.t * frequency, C / frequency, meeting)
 
     def _draw_axes(self, frame):
         # Each axis reaches at least 2× the peak field excursion, and covers the shown

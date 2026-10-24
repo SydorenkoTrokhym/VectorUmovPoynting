@@ -28,6 +28,12 @@ class PersistenceTests(unittest.TestCase):
         }
         restored = configuration_from_dict(legacy)
         self.assertEqual(restored.waves[1].source_position, (1, 2, 3))
+        # v1 placed source 2 at its own position: that distance is the separation.
+        self.assertAlmostEqual(restored.source_separation, 14 ** 0.5)
+
+    def test_schema_v1_without_source_position_keeps_the_default_separation(self):
+        legacy = {"schema_version": 1, "waves": {"0": {}, "1": {}}, "visualization": {}}
+        self.assertEqual(configuration_from_dict(legacy).source_separation, 8.0)
 
     def test_files_store_stable_keys_not_ui_texts(self):
         data = configuration_to_dict(ScenarioConfiguration())

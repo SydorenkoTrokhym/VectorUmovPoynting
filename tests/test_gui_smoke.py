@@ -1,5 +1,6 @@
 import os
 import sys
+import tempfile
 import unittest
 from dataclasses import replace
 
@@ -12,8 +13,9 @@ from PyQt6.QtWidgets import QApplication
 
 from controls import set_choice
 from geometry import wave_frame
+import camera
 from main_window import MainWindow
-from models import Background, ComponentMode, DirectionMode, Representation
+from models import Background, ComponentMode, DirectionMode, Projection, Representation
 from physics import C, calculate_fields
 from scene import FIELD_VIEW_SCALE
 from simulation import simulate_counterpropagating, simulate_wave
@@ -145,12 +147,14 @@ class MainWindowSmokeTests(unittest.TestCase):
 
         window._set_time(gap / 2 + 0.3)   # fronts met 0.3 T ago; fields are non-zero there
         p1, p2 = window.scenario_params
+        # Steps 3 puts sample 1 exactly on the meeting point, between two samples
+        # of the drawn curves.
         result = simulate_counterpropagating(
             p1, replace(p2, source_position=(0.0, 0.0, gap)), window.t,
-            steps=window.z_steps, switch_on_time=0.0)
-        positions = result.positions / WAVELENGTH
-        idx = int(np.argmin(np.linalg.norm(positions - [0.0, 0.0, gap / 2], axis=1)))
-        base = positions[idx]
+            steps=3, switch_on_time=0.0)
+        idx = 1
+        base = np.array([0.0, 0.0, gap / 2])
+        np.testing.assert_allclose(result.positions[idx] / WAVELENGTH, base)
         # Σ arrows start on the axis and end on the combined E/B curves.
         sum_pos = window.meeting_arrows.sum_arrows.pos
         expected_tips = [base + result.electric[idx] * FIELD_VIEW_SCALE,
@@ -353,8 +357,55 @@ class MainWindowSmokeTests(unittest.TestCase):
     def test_wave1_camera_looks_along_the_wave(self):
         window = self.window
         window.wave_prop_dir_combo.setCurrentText("-Z")
-        window._apply_wave1_camera()
+        window._apply_camera(0)
         np.testing.assert_allclose(list(window.view.opts['center']), [0.0, 0.0, -1.0])
+
+    def test_projection_applies_in_every_tab_and_survives_tab_changes(self):
+        window = self.window
+        window.update_plot()
+        set_choice(window.proj_combo, Projection.TOP)
+        self.assertEqual(window.view.opts['rotationMethod'], 'euler')
+        self.assertEqual((window.view.opts['elevation'], window.view.opts['azimuth']), (90, 0))
+        window.scenario_tabs.setCurrentIndex(1)
+        self.assertEqual(window.view.opts['rotationMethod'], 'euler')
+        self.assertEqual(window.view.opts['elevation'], 90)
+        # Still looking at the middle of wave 2 (source z = 2, −Z for 2 λ)
+        np.testing.assert_allclose(list(window.view.opts['center']), [0.0, 0.0, 1.0])
+        set_choice(window.proj_combo, Projection.PERSPECTIVE)   # back to the fixed camera
+        self.assertEqual(window.view.opts['rotationMethod'], 'quaternion')
+        self.assertEqual(window.view.opts['rotation'], camera.WAVE2_ROTATION)
+        self.assert_no_errors()
+
+    def test_direction_changes_redraw_once(self):
+        window = self.window
+        calls = []
+        original = window.update_plot
+        window.update_plot = lambda: (calls.append(1), original())
+        # E = +Y (B becomes +X, k = −Z); B = −X (k = +Z); k = −Z (B back to +X)
+        for change, expected in (
+                (lambda: window.e_dir_combo.setCurrentText("+Y"), ("+Y", "+X", "-Z")),
+                (lambda: window.b_dir_combo.setCurrentText("-X"), ("+Y", "-X", "+Z")),
+                (lambda: window.wave_prop_dir_combo.setCurrentText("-Z"), ("+Y", "+X", "-Z"))):
+            calls.clear()
+            change()
+            self.assertEqual(len(calls), 1)
+            params = window.scenario_params[0]
+            self.assertEqual((params.electric_direction, params.magnetic_direction,
+                              params.propagation_direction), expected)
+        self.assert_no_errors()
+
+    def test_saved_image_gets_an_extension_and_failures_are_reported(self):
+        window = self.window
+        window.update_plot()
+        with tempfile.TemporaryDirectory() as folder:
+            saved = window._save_image(os.path.join(folder, "picture"))
+            self.assertTrue(saved.endswith("picture.png"))
+            self.assertTrue(os.path.getsize(saved) > 0)
+            self.assertEqual(window.params_status.text(), "✓ picture.png")
+            jpeg = window._save_image(os.path.join(folder, "photo"), ".jpg")
+            self.assertTrue(os.path.exists(jpeg) and jpeg.endswith(".jpg"))
+            window._save_image(os.path.join(folder, "missing", "picture.png"))
+            self.assertTrue(window.params_status.text().startswith("Не вдалося"))
 
     def test_overlap_toggle_leaves_only_the_sum_in_the_overlap(self):
         window = self.window

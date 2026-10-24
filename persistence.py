@@ -69,7 +69,17 @@ def _migrate_v1(data: dict[str, Any]) -> dict[str, Any]:
     old_viz = data.get("visualization", {})
     if not isinstance(old_viz, dict):
         raise ConfigurationError("visualization must be an object")
-    return {"schema_version": 2, "waves": waves, "visualization": {
+    # v1 had no separation setting: the superposition put source 2 at its own
+    # position, so that distance is the separation the file meant.
+    separation = DEFAULT_SOURCE_SEPARATION
+    try:
+        distance = float(np.linalg.norm(np.asarray(waves[1]["source_position"], dtype=float)))
+    except (TypeError, ValueError):
+        distance = 0.0   # an invalid position is reported when the wave is parsed
+    if SEPARATION_RANGE[0] <= distance <= SEPARATION_RANGE[1]:
+        separation = distance
+    return {"schema_version": 2, "waves": waves, "source_separation": separation,
+            "visualization": {
         "component_mode": old_viz.get("comp_mode", "Узагальнений підхід"),
         "representation_mode": old_viz.get("repr_mode", "Linear (3D)"),
         "background": old_viz.get("background", "Чорний"),

@@ -67,6 +67,8 @@ class SceneFrame:
     z_max: float                               # coordinate-system size
     periods: float                             # elapsed time in carrier periods
     wavelength: float                          # metres per view unit
+    # Superposition only: the fields at [source 1, meeting point, source 2]
+    meeting: CounterpropagatingResult | None = None
 
     @property
     def meeting_point(self) -> np.ndarray:
@@ -492,20 +494,21 @@ class MeetingFieldArrows:
         self.labels = _new_labels(view, 6)
 
     def draw(self, frame: SceneFrame, style: DrawStyle):
-        """The vectors are taken at the sample nearest the meeting point and use the same
-        scale as the field curves, so the Σ arrows end on the combined curves. Each
+        """The vectors are the fields exactly at the meeting point, at the same scale as
+        the field curves, so the Σ arrows end on the combined curves. Each
         wave's own arrows are shifted toward its source (wave 1 at −k₁, wave 2 at +k₁),
         otherwise the equal E₁ and E₂ there would be drawn on top of each other.
         """
         groups = ((self.wave_arrows, ()), (self.sum_arrows, ()))
-        wave1, wave2 = frame.wave1, frame.wave2
-        if frame.tab == 2 and (wave1.active & wave2.active).any():
-            positions = frame.view_positions(wave1)
-            idx = int(np.argmin(np.linalg.norm(positions - frame.meeting_point, axis=1)))
-            base = positions[idx]
+        meeting = frame.meeting
+        idx = 1   # the meeting point in frame.meeting
+        if (frame.tab == 2 and meeting is not None
+                and meeting.wave1.active[idx] and meeting.wave2.active[idx]):
+            wave1, wave2 = meeting.wave1, meeting.wave2
+            base = frame.meeting_point
             e1, b1, _ = (v[idx] for v in wave_vectors(wave1))
             e2, b2, _ = (v[idx] for v in wave_vectors(wave2))
-            combined = frame.combined
+            combined = meeting
             se, sb, _ = (v[idx] for v in field_vectors(
                 combined.electric, combined.magnetic, combined.poynting, wave1.frame[0]))
             shift = MEET_FIELD_SHIFT * wave1.frame[0]
