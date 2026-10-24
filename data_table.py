@@ -35,7 +35,11 @@ def fill_table(table, rows, coordinates):
         values = [coordinate] + [format_value(rows[i, j], _FORMATS[j])
                                  for j in range(9) if active[j]]
         for column, text in enumerate(values):
-            cell = table.item(i, column) or QTableWidgetItem()
-            cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            table.setItem(i, column, cell)
+            cell = table.item(i, column)
+            if cell is None:
+                # Only new cells are inserted: re-inserting an item the table already
+                # owns is rejected with a Qt warning on every redraw.
+                cell = QTableWidgetItem()
+                cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                table.setItem(i, column, cell)
             cell.setText(text)

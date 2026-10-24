@@ -3,7 +3,11 @@ FROM python:3.12-slim
 
 # Встановлюємо системні залежності для Qt6 та OpenGL
 RUN apt-get update && apt-get install -y \
+    libegl1 \
     libgl1 \
+    libglx-mesa0 \
+    libgl1-mesa-dri \
+    libxkbcommon0 \
     libglib2.0-0 \
     libfontconfig1 \
     libx11-6 \
@@ -35,7 +39,6 @@ COPY . .
 
 # Налаштовуємо змінні оточення для GUI (X11)
 ENV DISPLAY=:0
-ENV QT_DEBUG_PLUGINS=1
 
 # Команда для запуску
 CMD ["python", "main.py"]

@@ -1,0 +1,18 @@
+# Keep the build context to what the image needs: the app, its requirements and tests.
+.git
+.gitattributes
+.gitignore
+.github
+.venv
+venv
+__pycache__
+*.py[cod]
+.idea
+.vscode
+.junie
+.claude
+hs_err_pid*.log
+replay_pid*.log
+Dockerfile
+docker-compose.yml
+.dockerignore

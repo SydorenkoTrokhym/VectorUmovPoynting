@@ -7,7 +7,7 @@ from dataclasses import replace
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
-from PyQt6.QtCore import QPoint, QPointF, Qt
+from PyQt6.QtCore import QPoint, QPointF, Qt, qInstallMessageHandler
 from PyQt6.QtGui import QWheelEvent
 from PyQt6.QtWidgets import QApplication
 
@@ -316,6 +316,20 @@ class MainWindowSmokeTests(unittest.TestCase):
                 window._set_time(0.37)
                 self.assert_table_matches_exact_fields(window.scenario_params[0])
         self.assert_no_errors()
+
+    def test_table_refresh_raises_no_qt_warnings(self):
+        window = self.window
+        window.chk_data.setChecked(True)
+        messages = []
+        previous = qInstallMessageHandler(lambda _type, _context, text: messages.append(text))
+        try:
+            for t in (0.1, 0.2, 0.3):   # refresh cells that already exist
+                window._set_time(t)
+        finally:
+            qInstallMessageHandler(previous)
+        self.assertEqual([m for m in messages if "QTableWidget" in m], [])
+        self.assertEqual(window.data_table.item(0, 0).textAlignment(),
+                         Qt.AlignmentFlag.AlignCenter.value)
 
     def test_calculation_error_clears_once_parameters_are_valid(self):
         window = self.window
