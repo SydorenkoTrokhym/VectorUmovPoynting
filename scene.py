@@ -13,6 +13,7 @@ from dataclasses import dataclass
 import numpy as np
 import pyqtgraph.opengl as gl
 
+from camera import screen_points
 from geometry import arrow_points, build_surface_faces
 from models import Background
 from palette import (BACKGROUNDS, MEETING_MARKER, NEUTRAL, SUM_COLORS, WAVE_COLORS,
@@ -30,7 +31,8 @@ FIELD_VIEW_SCALE = 0.30
 POYNTING_VIEW_SCALE = 0.80 * MU0 * C   # 3D-view units per W/m² of S
 DIM_ALPHA = 0.30            # individual waves while the combined field is shown
 
-INDICATOR_SIZE = 0.25       # λ/4: k/E/B direction arrows, matching the tick spacing
+INDICATOR_SIZE = 0.5        # λ/2: k/E/B direction arrows
+LABEL_CLEARANCE = (40, 16)  # px; a tick label this close on screen to another label is dropped
 MEET_TRIAD_NUDGE = 0.06     # λ; each wave's direction triad at the meeting point
 MEET_TRIAD_FADED = 0.35     # alpha of the meeting-point E/B directions once fields grow
 MEET_FIELD_SHIFT = 0.15     # λ; offset of each wave's E/B arrows at the meeting point
@@ -147,9 +149,11 @@ class AxesLayer:
         for label in self.tick_labels:
             label.setData(color=self._text_color)
 
-    def draw(self, plus, minus, notes, px_per_unit, grid_extent):
+    def draw(self, plus, minus, notes, px_per_unit, grid_extent, avoid=()):
         """Axis lengths in λ toward + (plus) and toward − (minus), per X/Y/Z; notes
-        name the field each axis carries ("E", "B" or "")."""
+        name the field each axis carries ("E", "B" or ""). Tick labels that would
+        overlap on screen the axis names, the `avoid` points (other labels) or each
+        other are left out."""
         points = []
         for axis, (name, length, back, note) in enumerate(zip("XYZ", plus, minus, notes)):
             unit = np.eye(3)[axis]
@@ -165,13 +169,14 @@ class AxesLayer:
                            tip, tip - unit * head - side * half_width]
         points = np.array(points, dtype=float)
         self.arrows.setData(pos=points, color=np.array([NEUTRAL] * len(points)))
-        self._draw_ticks(plus, minus, px_per_unit)
+        names = [np.eye(3)[axis] * length for axis, length in enumerate(plus)]
+        self._draw_ticks(plus, minus, px_per_unit, [*names, *avoid])
         if grid_extent is not None and grid_extent != self._grid_extent:
             self.grid.resetTransform()
             self.grid.scale(grid_extent / 10, grid_extent / 10, 1)
             self._grid_extent = grid_extent
 
-    def _draw_ticks(self, plus, minus, px_per_unit):
+    def _draw_ticks(self, plus, minus, px_per_unit, avoid):
         # Ticks are drawn every λ/4, but labels only every λ/4-multiple that keeps
         # them MIN_LABEL_PX apart on screen, so they don't overlap when zoomed out.
         px_per_unit = max(px_per_unit, 1e-9)
@@ -194,12 +199,28 @@ class AxesLayer:
                         text = _TICK_LABELS[i] if i < len(_TICK_LABELS) else f"{i}λ/4"
                         labels.append((tuple(p - label_side * size * 3.5),
                                        text if sign > 0 else "−" + text))
+        labels = self._clear_of(labels, avoid)
         for label, (pos, text) in zip(self.tick_labels, labels):
             label.setData(pos=pos, text=text, color=self._text_color)
             label.setVisible(True)
         for label in self.tick_labels[len(labels):]:
             label.setVisible(False)
         self.ticks.setData(pos=np.array(points, dtype=float) if points else np.zeros((2, 3)))
+
+
+    def _clear_of(self, labels, avoid):
+        """The labels, in order, without those that would overlap on screen a label
+        already placed: one of `avoid`, or a tick label kept before it."""
+        if not labels:
+            return labels
+        screen = screen_points(self.view, [pos for pos, _ in labels])
+        taken = list(screen_points(self.view, avoid))
+        kept = []
+        for label, point in zip(labels, screen):
+            if all(np.any(np.abs(point - other) >= LABEL_CLEARANCE) for other in taken):
+                kept.append(label)
+                taken.append(point)
+        return kept
 
 
 def axis_extents(points, minimum):
@@ -264,37 +285,38 @@ class IndicatorLayer:
         return arrows, tips
 
     def draw(self, frame: SceneFrame):
+        """Returns where the visible labels sit, for the axes to keep their tick labels
+        clear of them."""
         tab, source2 = frame.tab, frame.source2
         k2 = frame.wave2.frame[0]
         self.meeting_marker.setData(pos=frame.meeting_point.reshape(1, 3))
         self.meeting_marker.setVisible(tab == 2)
         self.source2_marker.setData(pos=source2.reshape(1, 3))
         self.source2_marker.setVisible(tab in (1, 2))
-        self.text_source2.setData(pos=tuple(source2 + k2 * INDICATOR_SIZE * 0.6), text='Дж.2')
+        # Behind the source, clear of the triad's labels in front of it
+        self.text_source2.setData(pos=tuple(source2 - k2 * INDICATOR_SIZE * 0.5), text='Дж.2')
         self.text_source2.setVisible(tab in (1, 2))
         self.text_e2.setVisible(False)
         self.text_b2.setVisible(False)
         if tab == 0:
-            self._draw_wave1_labels(frame)
+            self._draw_single(np.zeros(3), frame.wave1.frame, WAVE_COLORS[0], '₁')
         elif tab == 1:
-            self._draw_triads([(source2, frame.wave2.frame, WAVE_COLORS[1])])
-            (w2_e, w2_b, _, w2_k) = WAVE_COLORS[1]
-            _, (kl, el, bl) = self._triad(source2, frame.wave2.frame)
-            self._set_text(self.text_k, kl, 'k₂', w2_k)
-            self._set_text(self.text_e, el, 'E₂', w2_e)
-            self._set_text(self.text_b, bl, 'B₂', w2_b)
-            _show_labels(self.meet_labels, [])
+            self._draw_single(source2, frame.wave2.frame, WAVE_COLORS[1], '₂')
         else:
             self._draw_superposition(frame)
+        texts = [self.text_k, self.text_e, self.text_b, self.text_e2, self.text_b2,
+                 self.text_source2, *self.meet_labels]
+        return [np.asarray(item.pos, dtype=float) for item in texts if item.visible()]
 
-    def _draw_wave1_labels(self, frame):
-        # Tab 1: wave components only — no k/E/B arrows, labels sit on the axes
-        for item in (self.k_arrows, self.e_arrows, self.b_arrows, self.text_k):
-            item.setVisible(False)
-        (w1_e, w1_b, _, _) = WAVE_COLORS[0]
-        _, (_, el, bl) = self._triad(np.zeros(3), frame.wave1.frame)
-        self._set_text(self.text_e, el, 'E₁', w1_e)
-        self._set_text(self.text_b, bl, 'B₁', w1_b)
+    def _draw_single(self, source, wave_frame, colors, index):
+        """A single-wave tab: the wave's k/E/B triad at its source, so the initial
+        directions show before the front has left the source."""
+        self._draw_triads([(source, wave_frame, colors)])
+        e_color, b_color, _, k_color = colors
+        _, (kl, el, bl) = self._triad(source, wave_frame)
+        self._set_text(self.text_k, kl, 'k' + index, k_color)
+        self._set_text(self.text_e, el, 'E' + index, e_color)
+        self._set_text(self.text_b, bl, 'B' + index, b_color)
         _show_labels(self.meet_labels, [])
 
     def _draw_superposition(self, frame):

@@ -17,7 +17,7 @@ import camera
 from main_window import MainWindow
 from models import Background, ComponentMode, DirectionMode, Projection, Representation
 from physics import C, calculate_fields
-from scene import FIELD_VIEW_SCALE
+from scene import FIELD_VIEW_SCALE, INDICATOR_SIZE, LABEL_CLEARANCE, MEET_TRIAD_NUDGE
 from simulation import simulate_counterpropagating, simulate_wave
 
 WAVELENGTH = C / 1.0   # the window's carrier is fixed at 1 Hz
@@ -113,8 +113,9 @@ class MainWindowSmokeTests(unittest.TestCase):
         meet_labels = {label.text: np.asarray(label.pos)
                        for label in window.indicators.meet_labels if label.visible()}
         self.assertEqual(sorted(meet_labels), ["B₁", "B₂", "E₁", "E₂", "k₁", "k₂"])
-        for position in meet_labels.values():
-            self.assertLess(np.linalg.norm(position - [0.0, 0.0, gap / 2]), 0.5)
+        for position in meet_labels.values():   # just past the tips of the triads there
+            self.assertLessEqual(np.linalg.norm(position - [0.0, 0.0, gap / 2]),
+                                 INDICATOR_SIZE * 1.2 + MEET_TRIAD_NUDGE + 1e-9)
         # The two waves' k vectors at the meeting point face each other.
         self.assertGreater(meet_labels["k₁"][2], gap / 2)
         self.assertLess(meet_labels["k₂"][2], gap / 2)
@@ -265,6 +266,58 @@ class MainWindowSmokeTests(unittest.TestCase):
                 self.assertGreater(z_tip[2], 0)   # the arrow labelled Z points to +Z
         self.assert_no_errors()
 
+    def test_single_wave_tabs_show_the_initial_directions(self):
+        window = self.window
+        window._set_time(0.0)   # nothing has left the source yet
+        for tab, source in ((0, [0.0, 0.0, 0.0]), (1, [0.0, 0.0, 2.0])):
+            with self.subTest(tab=tab):
+                window.scenario_tabs.setCurrentIndex(tab)
+                window.update_plot()
+                indicators = window.indicators
+                k_hat, e_hat, b_hat = wave_frame(window.scenario_params[tab])
+                for item, direction in ((indicators.k_arrows, k_hat),
+                                        (indicators.e_arrows, e_hat),
+                                        (indicators.b_arrows, b_hat)):
+                    self.assertTrue(item.visible())
+                    pos = np.asarray(item.pos)
+                    np.testing.assert_allclose(pos[0], source)   # shaft starts at the source
+                    shaft = pos[1] - pos[0]
+                    np.testing.assert_allclose(shaft / np.linalg.norm(shaft), direction, atol=1e-9)
+                index = "₁₂"[tab]
+                self.assertEqual([indicators.text_k.text, indicators.text_e.text,
+                                  indicators.text_b.text], ["k" + index, "E" + index, "B" + index])
+                self.assertTrue(indicators.text_k.visible())
+        self.assert_no_errors()
+
+    def test_tick_labels_keep_clear_of_other_labels(self):
+        window = self.window
+        for tab in (0, 1, 2):
+            with self.subTest(tab=tab):
+                window.scenario_tabs.setCurrentIndex(tab)
+                if tab == 2:
+                    window._on_time_preset("meet")
+                else:
+                    window._set_time(0.0)
+                window.update_plot()
+                indicators = window.indicators
+                others = [item.pos for item in
+                          (indicators.text_k, indicators.text_e, indicators.text_b,
+                           indicators.text_e2, indicators.text_b2, indicators.text_source2,
+                           *indicators.meet_labels, *window.axes.labels) if item.visible()]
+                ticks = camera.screen_points(window.view, [
+                    label.pos for label in window.axes.tick_labels if label.visible()])
+                self.assertGreater(len(ticks), 3)
+                placed = list(camera.screen_points(window.view, others))
+                for tick in ticks:   # on screen, clear of every label placed before it
+                    for other in placed:
+                        self.assertTrue(np.any(np.abs(tick - other) >= LABEL_CLEARANCE))
+                    placed.append(tick)
+                if tab != 2:   # the field axes reach past the k/E/B arrows and their labels
+                    pos = np.asarray(window.axes.arrows.pos)
+                    self.assertGreaterEqual(pos[1][0], 2 * INDICATOR_SIZE)
+                    self.assertGreaterEqual(pos[7][1], 2 * INDICATOR_SIZE)
+        self.assert_no_errors()
+
     def test_wave2_camera_looks_at_the_middle_of_wave2(self):
         window = self.window
         window.scenario_tabs.setCurrentIndex(1)
@@ -379,6 +432,12 @@ class MainWindowSmokeTests(unittest.TestCase):
         rotated = self.window.view.opts['rotation'].rotatedVector(QVector3D(*map(float, vector)))
         return np.array([rotated.x(), rotated.y(), rotated.z()])
 
+    @staticmethod
+    def tilted(vector):
+        """Where the side view puts a screen direction once the camera tilt is applied."""
+        rotated = camera.SIDE_VIEW_TILT.rotatedVector(QVector3D(*map(float, vector)))
+        return np.array([rotated.x(), rotated.y(), rotated.z()])
+
     def test_wave1_camera_turns_with_the_wave_axis(self):
         window = self.window
         window.update_plot()
@@ -388,11 +447,12 @@ class MainWindowSmokeTests(unittest.TestCase):
                 self.assertEqual(window.view.opts['rotationMethod'], 'quaternion')
                 k_hat, e_hat, b_hat = wave_frame(window.scenario_params[0])
                 sign = 1.0 if direction[0] == "+" else -1.0
-                # The wave runs along the screen's horizontal (right-to-left toward −),
-                # E points up and B along the line of sight: still the +Z layout.
-                np.testing.assert_allclose(self.screen(k_hat), [sign, 0, 0], atol=1e-6)
-                np.testing.assert_allclose(self.screen(e_hat), [0, 1, 0], atol=1e-6)
-                np.testing.assert_allclose(self.screen(b_hat), [0, 0, sign], atol=1e-6)
+                # The +Z layout, tilted: the wave runs along the side view's horizontal
+                # (right-to-left toward −), E points up and B along its line of sight.
+                np.testing.assert_allclose(self.screen(k_hat), self.tilted([sign, 0, 0]), atol=1e-6)
+                np.testing.assert_allclose(self.screen(e_hat), self.tilted([0, 1, 0]), atol=1e-6)
+                np.testing.assert_allclose(self.screen(b_hat), self.tilted([0, 0, sign]), atol=1e-6)
+                self.assertGreater(np.linalg.norm(self.screen(b_hat)[:2]), 0.3)   # B shows
         # Along ±Z it is exactly the original Tab 1 camera.
         for axis in np.eye(3):
             np.testing.assert_allclose(
@@ -412,9 +472,10 @@ class MainWindowSmokeTests(unittest.TestCase):
                 k_hat, e_hat, b_hat = wave_frame(window.scenario_params[1])
                 sign = 1.0 if direction[0] == "+" else -1.0
                 # The −Z layout of Tab 2 turned onto the wave's axis: E points down.
-                np.testing.assert_allclose(self.screen(k_hat), [sign, 0, 0], atol=1e-6)
-                np.testing.assert_allclose(self.screen(e_hat), [0, -1, 0], atol=1e-6)
-                np.testing.assert_allclose(self.screen(b_hat), [0, 0, -sign], atol=1e-6)
+                np.testing.assert_allclose(self.screen(k_hat), self.tilted([sign, 0, 0]), atol=1e-6)
+                np.testing.assert_allclose(self.screen(e_hat), self.tilted([0, -1, 0]), atol=1e-6)
+                np.testing.assert_allclose(self.screen(b_hat), self.tilted([0, 0, -sign]), atol=1e-6)
+                self.assertGreater(np.linalg.norm(self.screen(b_hat)[:2]), 0.3)   # B shows
         # Along ±Z it is exactly the original Tab 2 camera.
         for axis in np.eye(3):
             np.testing.assert_allclose(
@@ -423,7 +484,7 @@ class MainWindowSmokeTests(unittest.TestCase):
                 atol=1e-6)
         window.scenario_tabs.setCurrentIndex(0)   # Tab 1 keeps its own wave's camera
         np.testing.assert_allclose(self.screen(wave_frame(window.scenario_params[0])[1]),
-                                   [0, 1, 0], atol=1e-6)
+                                   self.tilted([0, 1, 0]), atol=1e-6)
         self.assert_no_errors()
 
     def test_wave1_camera_for_a_tilted_vector_stays_proper(self):
@@ -433,7 +494,7 @@ class MainWindowSmokeTests(unittest.TestCase):
         window.dir_z_spin.setValue(0.0)
         window.dir_y_spin.setValue(1.0)   # k = (1, 1, 0)/√2
         k_hat = wave_frame(window.scenario_params[0])[0]
-        np.testing.assert_allclose(self.screen(k_hat), [1, 0, 0], atol=1e-6)
+        np.testing.assert_allclose(self.screen(k_hat), self.tilted([1, 0, 0]), atol=1e-6)
         columns = np.array([self.screen(axis) for axis in np.eye(3)]).T
         self.assertAlmostEqual(np.linalg.det(columns), 1.0, places=5)   # no mirror image
         self.assert_no_errors()

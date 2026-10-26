@@ -18,7 +18,7 @@ from models import (Background, ComponentMode, DirectionMode, Modulation, Polari
                     Projection, Representation, ScenarioConfiguration, VisualizationSettings)
 from persistence import ConfigurationError, configuration_from_dict, configuration_to_dict
 from physics import C
-from scene import (FIELD_VIEW_SCALE, AxesLayer, DrawStyle, FieldLayer, IndicatorLayer,
+from scene import (FIELD_VIEW_SCALE, INDICATOR_SIZE, AxesLayer, DrawStyle, FieldLayer, IndicatorLayer,
                    MeetingFieldArrows, SceneFrame, axis_extents, field_axis_notes)
 from simulation import simulate_counterpropagating, simulate_wave
 from superposition import (CARRIER_FREQUENCY, TIME_STEP, place_source2, preset_periods,
@@ -532,8 +532,8 @@ class MainWindow(QMainWindow):
                 self._init_camera(frame.tab)
             if frame.tab == SUPERPOSITION_TAB:
                 self.time_status.setText(time_text(frame.extent, frame.periods))
-            self._draw_axes(frame)
-            self.indicators.draw(frame)
+            labels = self.indicators.draw(frame)
+            self._draw_axes(frame, labels)
             self._fill_data_table(frame)
             style = self._draw_style()
             self.fields.draw(frame, style)
@@ -584,18 +584,20 @@ class MainWindow(QMainWindow):
         return SceneFrame(tab, wave1, wave2, combined, source2, extent, z_max,
                           self.t * frequency, C / frequency, meeting)
 
-    def _draw_axes(self, frame):
+    def _draw_axes(self, frame, labels=()):
         # Each axis reaches at least 2× the peak field excursion, and covers the shown
         # wave on whichever side of the origin it runs (plus a 2 λ margin). Every arrow
         # points to its + direction, so the axes stay right-handed under every camera.
         p1, p2 = self.scenario_params
-        minimum = 2 * max(p1.amplitude, p2.amplitude, 1e-12) * FIELD_VIEW_SCALE
+        # They also reach past the k/E/B arrows, so the axis names clear their labels.
+        minimum = max(2 * max(p1.amplitude, p2.amplitude, 1e-12) * FIELD_VIEW_SCALE,
+                      2 * INDICATOR_SIZE)
         # The superposition's wave 1 already spans the whole gap between the sources.
         wave = frame.wave2 if frame.tab == WAVE2_TAB else frame.wave1
         plus, minus = axis_extents(frame.view_positions(wave), minimum)
         notes = field_axis_notes(wave.frame) if frame.tab != SUPERPOSITION_TAB else ("",) * 3
         self.axes.draw(plus, minus, notes, px_per_unit=self._pixels_per_unit(),
-                       grid_extent=frame.z_max)
+                       grid_extent=frame.z_max, avoid=labels)
 
     def _draw_style(self) -> DrawStyle:
         component = choice(self.comp_combo, ComponentMode)

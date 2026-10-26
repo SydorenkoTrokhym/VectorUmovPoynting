@@ -5,19 +5,26 @@ import math
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtGui import QQuaternion, QVector3D
+from PyQt6.QtGui import QMatrix4x4, QQuaternion, QVector3D
 
 from models import Projection
 
-# Camera orientation for Tab 1 ("Хвиля 1"): X up, Z left-to-right, Y toward the viewer.
-# A plain elevation/azimuth pair can't reach this exact axis mapping (it's the "wrong-handed"
-# 3-cycle of the two reachable via X-then-Z Euler rotation), so it's set as a fixed quaternion.
-WAVE1_ROTATION = QQuaternion(0.5, 0.5, 0.5, 0.5)
+# A straight side view puts B along the line of sight, where it shrinks to a dot, so
+# the single-wave cameras look at the side view from a little above and to the side:
+# turned 30° about the screen's vertical, then 20° about its horizontal.
+SIDE_VIEW_TILT = (QQuaternion.fromAxisAndAngle(1, 0, 0, 20)
+                  * QQuaternion.fromAxisAndAngle(0, 1, 0, -30))
 
-# Camera orientation for Tab 2 ("Хвиля 2"): X down, Y away from the viewer, Z left-to-right.
-# This is a proper rotation, so the axes on screen stay right-handed (X × Y = Z), as the
-# E × B = S right-hand rule needs; wave 2 (−Z by default) then runs right-to-left.
-WAVE2_ROTATION = QQuaternion(-0.5, 0.5, -0.5, 0.5)
+# Camera orientation for Tab 1 ("Хвиля 1"): X up, Z left-to-right, Y toward the viewer,
+# tilted. A plain elevation/azimuth pair can't reach this axis mapping (it's the
+# "wrong-handed" 3-cycle of the two reachable via X-then-Z Euler rotation), so it's set
+# as a fixed quaternion.
+WAVE1_ROTATION = SIDE_VIEW_TILT * QQuaternion(0.5, 0.5, 0.5, 0.5)
+
+# Camera orientation for Tab 2 ("Хвиля 2"): X down, Y away from the viewer, Z left-to-right,
+# tilted. This is a proper rotation, so the axes on screen stay right-handed (X × Y = Z),
+# as the E × B = S right-hand rule needs; wave 2 (−Z by default) then runs right-to-left.
+WAVE2_ROTATION = SIDE_VIEW_TILT * QQuaternion(-0.5, 0.5, -0.5, 0.5)
 
 # Tabs 1 and 2 for a wave along another axis: that axis takes Z's place (left-to-right)
 # and the axis its E lies along takes X's place (up on Tab 1, down on Tab 2).
@@ -53,6 +60,17 @@ def pixels_per_unit(view):
     return width / (dist * 2 * math.tan(fov / 2))
 
 
+def screen_points(view, points):
+    """Where the current camera puts 3D points in the view, in pixels from its top left
+    (as GLTextItem places its text)."""
+    viewport = view.getViewport()
+    to_pixels = QMatrix4x4()
+    to_pixels.viewport(0, viewport[3], viewport[2], -viewport[3])
+    transform = to_pixels * view.projectionMatrix(viewport, viewport) * view.viewMatrix()
+    mapped = (transform.map(QVector3D(*map(float, point))) for point in points)
+    return np.array([(p.x(), p.y()) for p in mapped]).reshape(-1, 2)
+
+
 def set_projection(view, projection: Projection):
     """Apply a projection's elevation/azimuth, keeping the current distance."""
     elevation, azimuth = _PROJECTIONS[projection]
@@ -69,7 +87,8 @@ def rotation_along(k_hat, upside_down=False) -> QQuaternion:
     """Camera for a wave travelling along k_hat: the + direction of its main axis runs
     left-to-right, the E axis of that direction points up (down if upside_down), and
     right × up points toward the viewer, so the rotation is proper and the axes stay
-    right-handed. Along ±Z this is WAVE1_ROTATION, or WAVE2_ROTATION upside down."""
+    right-handed; then SIDE_VIEW_TILT. Along ±Z this is WAVE1_ROTATION, or
+    WAVE2_ROTATION upside down."""
     k_hat = np.asarray(k_hat, dtype=float)
     axis = int(np.argmax(np.abs(k_hat)))
     right = k_hat * np.sign(k_hat[axis])          # a wave along −k runs right-to-left
@@ -79,8 +98,9 @@ def rotation_along(k_hat, upside_down=False) -> QQuaternion:
     toward = np.cross(right, up)
     # fromAxes maps the camera's x/y/z to these world directions; the view needs
     # the opposite mapping, world → camera.
-    return QQuaternion.fromAxes(*(QVector3D(*map(float, v)) for v in (right, up, toward))
-                                ).conjugated()
+    side_view = QQuaternion.fromAxes(*(QVector3D(*map(float, v)) for v in (right, up, toward))
+                                     ).conjugated()
+    return SIDE_VIEW_TILT * side_view
 
 
 def set_fixed_camera(view, rotation: QQuaternion, center):
