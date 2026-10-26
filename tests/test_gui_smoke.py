@@ -8,7 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
 from PyQt6.QtCore import QPoint, QPointF, Qt, qInstallMessageHandler
-from PyQt6.QtGui import QWheelEvent
+from PyQt6.QtGui import QQuaternion, QVector3D, QWheelEvent
 from PyQt6.QtWidgets import QApplication
 
 from controls import set_choice
@@ -374,6 +374,79 @@ class MainWindowSmokeTests(unittest.TestCase):
         window._apply_camera(0)
         np.testing.assert_allclose(list(window.view.opts['center']), [0.0, 0.0, -1.0])
 
+    def screen(self, vector):
+        """Where the view's rotation puts a world direction: x right, y up, z toward the viewer."""
+        rotated = self.window.view.opts['rotation'].rotatedVector(QVector3D(*map(float, vector)))
+        return np.array([rotated.x(), rotated.y(), rotated.z()])
+
+    def test_wave1_camera_turns_with_the_wave_axis(self):
+        window = self.window
+        window.update_plot()
+        for direction in ("+X", "-X", "+Y", "-Y", "-Z", "+Z"):
+            with self.subTest(direction=direction):
+                window.wave_prop_dir_combo.setCurrentText(direction)   # no manual camera call
+                self.assertEqual(window.view.opts['rotationMethod'], 'quaternion')
+                k_hat, e_hat, b_hat = wave_frame(window.scenario_params[0])
+                sign = 1.0 if direction[0] == "+" else -1.0
+                # The wave runs along the screen's horizontal (right-to-left toward −),
+                # E points up and B along the line of sight: still the +Z layout.
+                np.testing.assert_allclose(self.screen(k_hat), [sign, 0, 0], atol=1e-6)
+                np.testing.assert_allclose(self.screen(e_hat), [0, 1, 0], atol=1e-6)
+                np.testing.assert_allclose(self.screen(b_hat), [0, 0, sign], atol=1e-6)
+        # Along ±Z it is exactly the original Tab 1 camera.
+        for axis in np.eye(3):
+            np.testing.assert_allclose(
+                self.screen(axis),
+                [getattr(camera.WAVE1_ROTATION.rotatedVector(QVector3D(*axis)), c)() for c in "xyz"],
+                atol=1e-6)
+        self.assert_no_errors()
+
+    def test_wave2_camera_turns_with_the_wave_axis(self):
+        window = self.window
+        window.scenario_tabs.setCurrentIndex(1)
+        window.update_plot()
+        for direction in ("+X", "-X", "+Y", "-Y", "+Z", "-Z"):
+            with self.subTest(direction=direction):
+                window.wave_prop_dir_combo.setCurrentText(direction)   # no manual camera call
+                self.assertEqual(window.view.opts['rotationMethod'], 'quaternion')
+                k_hat, e_hat, b_hat = wave_frame(window.scenario_params[1])
+                sign = 1.0 if direction[0] == "+" else -1.0
+                # The −Z layout of Tab 2 turned onto the wave's axis: E points down.
+                np.testing.assert_allclose(self.screen(k_hat), [sign, 0, 0], atol=1e-6)
+                np.testing.assert_allclose(self.screen(e_hat), [0, -1, 0], atol=1e-6)
+                np.testing.assert_allclose(self.screen(b_hat), [0, 0, -sign], atol=1e-6)
+        # Along ±Z it is exactly the original Tab 2 camera.
+        for axis in np.eye(3):
+            np.testing.assert_allclose(
+                self.screen(axis),
+                [getattr(camera.WAVE2_ROTATION.rotatedVector(QVector3D(*axis)), c)() for c in "xyz"],
+                atol=1e-6)
+        window.scenario_tabs.setCurrentIndex(0)   # Tab 1 keeps its own wave's camera
+        np.testing.assert_allclose(self.screen(wave_frame(window.scenario_params[0])[1]),
+                                   [0, 1, 0], atol=1e-6)
+        self.assert_no_errors()
+
+    def test_wave1_camera_for_a_tilted_vector_stays_proper(self):
+        window = self.window
+        set_choice(window.dir_mode_combo, DirectionMode.VECTOR)
+        window.dir_x_spin.setValue(1.0)
+        window.dir_z_spin.setValue(0.0)
+        window.dir_y_spin.setValue(1.0)   # k = (1, 1, 0)/√2
+        k_hat = wave_frame(window.scenario_params[0])[0]
+        np.testing.assert_allclose(self.screen(k_hat), [1, 0, 0], atol=1e-6)
+        columns = np.array([self.screen(axis) for axis in np.eye(3)]).T
+        self.assertAlmostEqual(np.linalg.det(columns), 1.0, places=5)   # no mirror image
+        self.assert_no_errors()
+
+    def test_other_parameters_keep_a_user_rotated_camera(self):
+        window = self.window
+        window.update_plot()
+        turned = QQuaternion.fromEulerAngles(10.0, 20.0, 30.0)
+        window.view.opts['rotation'] = turned
+        window.amp_spin.setValue(2.0)
+        window.n_periods_spin.setValue(3)
+        self.assertEqual(window.view.opts['rotation'], turned)
+
     def test_projection_applies_in_every_tab_and_survives_tab_changes(self):
         window = self.window
         window.update_plot()
@@ -387,7 +460,11 @@ class MainWindowSmokeTests(unittest.TestCase):
         np.testing.assert_allclose(list(window.view.opts['center']), [0.0, 0.0, 1.0])
         set_choice(window.proj_combo, Projection.PERSPECTIVE)   # back to the fixed camera
         self.assertEqual(window.view.opts['rotationMethod'], 'quaternion')
-        self.assertEqual(window.view.opts['rotation'], camera.WAVE2_ROTATION)
+        for axis in np.eye(3):
+            np.testing.assert_allclose(
+                self.screen(axis),
+                [getattr(camera.WAVE2_ROTATION.rotatedVector(QVector3D(*axis)), c)() for c in "xyz"],
+                atol=1e-6)
         self.assert_no_errors()
 
     def test_direction_changes_redraw_once(self):

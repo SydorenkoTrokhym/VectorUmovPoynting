@@ -208,6 +208,7 @@ class MainWindow(QMainWindow):
         if index == SUPERPOSITION_TAB:
             return
         p = self.scenario_params[index]
+        direction = (p.direction_mode, p.propagation_direction, p.direction_vector)
         p.polarization = choice(self.pol_combo, Polarization)
         p.amplitude = self.amp_spin.value()
         p.phase_degrees = self.phase_spin.value()
@@ -220,6 +221,8 @@ class MainWindow(QMainWindow):
         p.direction_vector = (self.dir_x_spin.value(), self.dir_y_spin.value(), self.dir_z_spin.value())
         p.electric_direction = self.e_dir_combo.currentText()
         p.magnetic_direction = self.b_dir_combo.currentText()
+        if direction != (p.direction_mode, p.propagation_direction, p.direction_vector):
+            self._apply_camera(index)   # the tab's camera turns with the wave's axis
         self.update_plot()
 
     def _rebuild_magnetic_direction_choices(self, preferred=None):
@@ -324,17 +327,24 @@ class MainWindow(QMainWindow):
     def _apply_camera(self, tab):
         """With the "3D" projection, Tabs 1 and 2 use their fixed cameras:
         Tab 1 — X up, Z left-to-right, Y toward the viewer;
-        Tab 2 — X down, Y away from the viewer, Z left-to-right.
+        Tab 2 — X down, Y away from the viewer, Z left-to-right;
+        for a ±X/±Y wave the same layout is turned onto its axis (camera.rotation_along).
         The superposition, and every tab under XY/XZ/YZ, uses the projection's
         elevation/azimuth camera. Either way it looks at the tab's _camera_target."""
         projection = choice(self.proj_combo, Projection)
         target = self._camera_target(tab)
         if projection == Projection.PERSPECTIVE and tab != SUPERPOSITION_TAB:
-            rotation = camera.WAVE1_ROTATION if tab == WAVE1_TAB else camera.WAVE2_ROTATION
-            camera.set_fixed_camera(self.view, rotation, target)
+            camera.set_fixed_camera(self.view, self._wave_rotation(tab), target)
         else:
             camera.set_default_camera(self.view, projection)
             camera.look_at(self.view, target)
+
+    def _wave_rotation(self, tab):
+        try:
+            return camera.rotation_along(wave_frame(self.scenario_params[tab])[0],
+                                         upside_down=tab == WAVE2_TAB)
+        except ValueError:   # the redraw reports the invalid direction
+            return camera.WAVE1_ROTATION if tab == WAVE1_TAB else camera.WAVE2_ROTATION
 
     def _camera_target(self, tab):
         """Tab 1: a quarter of the axis length (wave plus margin) along k from the

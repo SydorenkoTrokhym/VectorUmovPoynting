@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtGui import QQuaternion
+from PyQt6.QtGui import QQuaternion, QVector3D
 
 from models import Projection
 
@@ -17,6 +18,13 @@ WAVE1_ROTATION = QQuaternion(0.5, 0.5, 0.5, 0.5)
 # This is a proper rotation, so the axes on screen stay right-handed (X × Y = Z), as the
 # E × B = S right-hand rule needs; wave 2 (−Z by default) then runs right-to-left.
 WAVE2_ROTATION = QQuaternion(-0.5, 0.5, -0.5, 0.5)
+
+# Tabs 1 and 2 for a wave along another axis: that axis takes Z's place (left-to-right)
+# and the axis its E lies along takes X's place (up on Tab 1, down on Tab 2).
+# Indexed by the wave's main axis.
+_UP_FOR_AXIS = (np.array([0., 1., 0.]),   # along X: Y up (Z toward the viewer)
+                np.array([1., 0., 0.]),   # along Y: X up (Z away from the viewer)
+                np.array([1., 0., 0.]))   # along Z: X up (Y toward the viewer)
 
 # (elevation, azimuth) for each standard projection
 _PROJECTIONS = {
@@ -55,6 +63,24 @@ def set_default_camera(view, projection: Projection):
     """Leave a fixed quaternion camera for the standard elevation/azimuth one."""
     view.opts['rotationMethod'] = 'euler'
     set_projection(view, projection)
+
+
+def rotation_along(k_hat, upside_down=False) -> QQuaternion:
+    """Camera for a wave travelling along k_hat: the + direction of its main axis runs
+    left-to-right, the E axis of that direction points up (down if upside_down), and
+    right × up points toward the viewer, so the rotation is proper and the axes stay
+    right-handed. Along ±Z this is WAVE1_ROTATION, or WAVE2_ROTATION upside down."""
+    k_hat = np.asarray(k_hat, dtype=float)
+    axis = int(np.argmax(np.abs(k_hat)))
+    right = k_hat * np.sign(k_hat[axis])          # a wave along −k runs right-to-left
+    up = _UP_FOR_AXIS[axis] * (-1.0 if upside_down else 1.0)
+    up = up - np.dot(up, right) * right
+    up /= np.linalg.norm(up)
+    toward = np.cross(right, up)
+    # fromAxes maps the camera's x/y/z to these world directions; the view needs
+    # the opposite mapping, world → camera.
+    return QQuaternion.fromAxes(*(QVector3D(*map(float, v)) for v in (right, up, toward))
+                                ).conjugated()
 
 
 def set_fixed_camera(view, rotation: QQuaternion, center):
